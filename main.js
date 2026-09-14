@@ -31,7 +31,7 @@
  */
 
 const obsidian = require('obsidian');
-const { Plugin, Notice, MarkdownView, setIcon } = obsidian;
+const { Plugin, Notice, MarkdownView, Platform, setIcon } = obsidian;
 
 /* How many moves we are willing to remember. */
 const MAX_ENTRIES = 10;
@@ -46,6 +46,18 @@ const SETTLE_MS = 140;
 const VERIFY_MS = 300;
 
 const LONG_PRESS_MS = 450;
+
+/* How far a finger may wander before it is a drag rather than a press. */
+const DRAG_SLOP = 6;
+
+/* The gap kept between the button and whatever it sits beside. */
+const GAP = 12;
+
+/* Where down the note the button sits by default: below the eye line, so it
+ * is not in the way of the line being read, and within reach of a thumb.
+ * A ratio rather than a measurement, so it means the same thing on a phone
+ * as on a desktop. */
+const DOWN_THE_PAGE = 0.62;
 
 /* Reading view renders an <a class="internal-link">; Live Preview renders a
  * span pair, the outer of which carries cm-hmd-internal-link. Clicks land on
@@ -133,6 +145,52 @@ function nextUsable(stack, currentPath) {
   return { entry: null, rest: rest };
 }
 
+/* Where the button goes when nobody has moved it.
+ *
+ * Beside the column of text, not in the far corner of the screen: on a wide
+ * window the corner is a long way from the line being read. The column's own
+ * edge is asked for the number, so it follows the width the reader has
+ * chosen instead of a measurement taken once on one screen. Where the margin
+ * is too narrow to stand in - a phone, a split pane - clampSpot() brings it
+ * back inside.
+ */
+function defaultSpot(col, pane, size) {
+  return {
+    left: col.right + GAP,
+    top: pane.top + pane.height * DOWN_THE_PAGE - size / 2,
+  };
+}
+
+/* Keep the button inside the pane it belongs to.
+ *
+ * The pane, not the window: its edges already exclude the status bar on a
+ * desktop and the toolbar on a phone, so nothing here has to know those
+ * exist. Applied on every placement, so a position remembered on a larger
+ * screen cannot strand the button where it can never be pressed. */
+function clampSpot(spot, pane, size) {
+  const minLeft = GAP;
+  const maxLeft = Math.max(minLeft, pane.right - size - GAP);
+  const minTop = pane.top + GAP;
+  const maxTop = Math.max(minTop, pane.bottom - size - GAP);
+  return {
+    left: Math.min(Math.max(spot.left, minLeft), maxLeft),
+    top: Math.min(Math.max(spot.top, minTop), maxTop),
+  };
+}
+
+/* A finger that has travelled this far was moving the button, not pressing
+ * it. Without a threshold every press on a touch screen would be a drag. */
+function isDrag(dx, dy) {
+  return Math.abs(dx) > DRAG_SLOP || Math.abs(dy) > DRAG_SLOP;
+}
+
+/* A position measured on one screen means nothing on another, so a phone and
+ * a desktop remember separately rather than handing each other a number
+ * neither can use. */
+function spotKey(isMobile) {
+  return 'backtrack/spot/' + (isMobile ? 'mobile' : 'desktop');
+}
+
 /* The topmost usable entry, without disturbing anything.
  *
  * render() needs this and must not consume: a reader who wanders off by hand
@@ -164,6 +222,9 @@ class BacktrackPlugin extends Plugin {
     this.settleTimer = 0;
     this.pressTimer = 0;
     this.button = null;
+    this.press = null;
+    this.suppressClick = false;
+    this.at = null;
 
     /* Capture phase on purpose. Obsidian's own handler runs on the way back
      * up and moves the view; by then the position we want is gone. */
@@ -178,6 +239,15 @@ class BacktrackPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: 'reset-position',
+      name: 'Put the button back',
+      callback: () => {
+        this.forgetSpot();
+        this.place();
+      },
+    });
+
+    this.addCommand({
       id: 'write-trace',
       name: 'Write a debug trace',
       callback: () => {
@@ -188,11 +258,16 @@ class BacktrackPlugin extends Plugin {
     /* The button's answer depends on which note is on screen, so it has to be
      * asked again whenever that changes. A judgement nobody re-runs keeps
      * showing yesterday's conclusion. */
-    const again = () => this.render();
+    const again = () => {
+      this.render();
+      this.place();
+    };
     if (typeof this.app.workspace.on === 'function') {
       this.registerEvent(this.app.workspace.on('active-leaf-change', again));
       this.registerEvent(this.app.workspace.on('file-open', again));
+      this.registerEvent(this.app.workspace.on('resize', again));
     }
+    this.registerDomEvent(window, 'resize', again);
 
     this.app.workspace.onLayoutReady(() => this.ensureButton());
   }
@@ -350,33 +425,166 @@ class BacktrackPlugin extends Plugin {
     el.setAttribute('aria-label', 'Undo the last move');
     setIcon(el, 'undo-2');
 
-    el.addEventListener('click', () => this.goBack());
+    /* One gesture, read three ways: a press goes back, a press held says
+     * where it would go, a press that travels moves the button. They are
+     * told apart by distance and time, not by three separate controls. */
+    el.addEventListener('pointerdown', (e) => this.onPress(e));
+    el.addEventListener('pointermove', (e) => this.onPressMove(e));
+    el.addEventListener('pointerup', (e) => this.onPressEnd(e));
+    el.addEventListener('pointercancel', () => this.endPress());
+    el.addEventListener('click', () => {
+      if (this.suppressClick) {
+        this.suppressClick = false;
+        return;
+      }
+      this.goBack();
+    });
     el.addEventListener('contextmenu', (e) => {
       if (e && typeof e.preventDefault === 'function') e.preventDefault();
       this.sayWhere();
     });
-    el.addEventListener('touchstart', () => {
-      if (this.pressTimer) window.clearTimeout(this.pressTimer);
-      this.pressTimer = window.setTimeout(() => {
-        this.pressTimer = 0;
-        this.sayWhere();
-      }, LONG_PRESS_MS);
-    });
-    const cancel = () => {
-      if (this.pressTimer) window.clearTimeout(this.pressTimer);
-      this.pressTimer = 0;
-    };
-    el.addEventListener('touchend', cancel);
-    el.addEventListener('touchmove', cancel);
 
     this.button = el;
     this.render();
+    this.place();
     return el;
   }
 
   /* Nothing here is on a timer. A control that disappears by itself has to be
    * looked for every time, and a control you have to look for is one you stop
    * trusting. It goes when there is nothing left to undo, and not before. */
+  /* --- where it sits ----------------------------------------------- */
+
+  /* The pane we are in, and the column of text inside it. Read fresh every
+   * time: the reader can widen the window, split the pane or turn the phone,
+   * and a number taken once would outlive all three. */
+  measure() {
+    const view = this.activeView();
+    const host = view && view.contentEl;
+    if (!host || typeof host.getBoundingClientRect !== 'function') return null;
+    const pane = host.getBoundingClientRect();
+    if (!pane || !pane.height) return null;
+    const inner =
+      (typeof host.querySelector === 'function' &&
+        host.querySelector('.markdown-preview-sizer, .cm-sizer, .cm-content')) ||
+      host;
+    const col =
+      inner && typeof inner.getBoundingClientRect === 'function'
+        ? inner.getBoundingClientRect()
+        : pane;
+    return { pane: pane, col: col };
+  }
+
+  size() {
+    const el = this.button;
+    const box = el && typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : null;
+    return box && box.width ? box.width : 44;
+  }
+
+  readSpot() {
+    try {
+      const raw = window.localStorage.getItem(spotKey(!!(Platform && Platform.isMobile)));
+      if (!raw) return null;
+      const spot = JSON.parse(raw);
+      if (!spot || typeof spot.left !== 'number' || typeof spot.top !== 'number') return null;
+      return spot;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  saveSpot(spot) {
+    try {
+      window.localStorage.setItem(spotKey(!!(Platform && Platform.isMobile)), JSON.stringify(spot));
+    } catch (e) {
+      /* A position we cannot remember is not worth a message. */
+    }
+  }
+
+  forgetSpot() {
+    try {
+      window.localStorage.removeItem(spotKey(!!(Platform && Platform.isMobile)));
+    } catch (e) {
+      /* nothing to undo */
+    }
+  }
+
+  /* Put the button where it belongs: where it was left, or beside the column
+   * if it has never been moved. Either way inside the pane. */
+  place(spot) {
+    if (!this.button) return null;
+    const seen = this.measure();
+    if (!seen) return null;
+    const size = this.size();
+    const wanted = spot || this.readSpot() || defaultSpot(seen.col, seen.pane, size);
+    const at = clampSpot(wanted, seen.pane, size);
+    const style = this.button.style;
+    style.setProperty('left', at.left + 'px');
+    style.setProperty('top', at.top + 'px');
+    style.setProperty('right', 'auto');
+    style.setProperty('bottom', 'auto');
+    this.at = at;
+    return at;
+  }
+
+  /* --- the gesture -------------------------------------------------- */
+
+  onPress(e) {
+    const at = this.at || this.place();
+    this.press = {
+      x: e.clientX,
+      y: e.clientY,
+      left: at ? at.left : 0,
+      top: at ? at.top : 0,
+      moved: false,
+    };
+    if (this.button && typeof this.button.setPointerCapture === 'function' && e.pointerId !== undefined) {
+      this.button.setPointerCapture(e.pointerId);
+    }
+    if (this.pressTimer) window.clearTimeout(this.pressTimer);
+    this.pressTimer = window.setTimeout(() => {
+      this.pressTimer = 0;
+      if (this.press && !this.press.moved) this.sayWhere();
+    }, LONG_PRESS_MS);
+  }
+
+  onPressMove(e) {
+    if (!this.press) return;
+    const dx = e.clientX - this.press.x;
+    const dy = e.clientY - this.press.y;
+    if (!this.press.moved && !isDrag(dx, dy)) return;
+    this.press.moved = true;
+    if (this.pressTimer) {
+      window.clearTimeout(this.pressTimer);
+      this.pressTimer = 0;
+    }
+    if (typeof e.preventDefault === 'function') e.preventDefault();
+    this.place({ left: this.press.left + dx, top: this.press.top + dy });
+  }
+
+  onPressEnd(e) {
+    const press = this.press;
+    if (!press) return;
+    if (press.moved) {
+      const dx = e.clientX - press.x;
+      const dy = e.clientY - press.y;
+      const at = this.place({ left: press.left + dx, top: press.top + dy });
+      if (at) this.saveSpot(at);
+      /* The browser sends a click after the pointer goes up. A drag is not a
+       * press, so that one is swallowed rather than taken as "go back". */
+      this.suppressClick = true;
+    }
+    this.endPress();
+  }
+
+  endPress() {
+    if (this.pressTimer) {
+      window.clearTimeout(this.pressTimer);
+      this.pressTimer = 0;
+    }
+    this.press = null;
+  }
+
   render() {
     if (!this.button) return;
     const usable = peekUsable(this.stack, this.currentPath());
@@ -436,6 +644,12 @@ module.exports.classify = classify;
 module.exports.pushEntry = pushEntry;
 module.exports.nextUsable = nextUsable;
 module.exports.peekUsable = peekUsable;
+module.exports.defaultSpot = defaultSpot;
+module.exports.clampSpot = clampSpot;
+module.exports.isDrag = isDrag;
+module.exports.spotKey = spotKey;
+module.exports.GAP = GAP;
+module.exports.DRAG_SLOP = DRAG_SLOP;
 module.exports.describeEntry = describeEntry;
 module.exports.MAX_ENTRIES = MAX_ENTRIES;
 module.exports.LINK_SELECTOR = LINK_SELECTOR;

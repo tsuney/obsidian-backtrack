@@ -20,7 +20,7 @@ const installed = dom.install();
 const El = installed.El;
 const body = installed.body;
 
-const { Notice } = require('./test/obsidian-stub.js');
+const { Notice, Platform } = require('./test/obsidian-stub.js');
 
 const m = require('./main.js');
 const {
@@ -31,6 +31,11 @@ const {
   pushEntry,
   nextUsable,
   peekUsable,
+  defaultSpot,
+  clampSpot,
+  isDrag,
+  spotKey,
+  GAP,
   describeEntry,
   MAX_ENTRIES,
   LINK_SELECTOR,
@@ -186,8 +191,15 @@ function makeLink(cls, href) {
 
 function makeApp(path, state) {
   const file = { path: path };
+  const pane = new El('div');
+  pane.setBox(300, 60, 800, 700);
+  const column = pane.make('div', { cls: 'markdown-preview-sizer' });
+  column.setBox(500, 60, 400, 2000);
   const view = {
     file: file,
+    contentEl: pane,
+    pane: pane,
+    column: column,
     state: state === undefined ? { scroll: 0 } : state,
     applied: undefined,
     getEphemeralState() { return this.state; },
@@ -481,6 +493,155 @@ function clickThen(p, anchorEl) {
   check('and a Japanese heading anchor is caught like any other', p.stack.length === 1);
   p.goBack();
   eq('and takes us back to where we were reading', app.view.applied, { scroll: 3 });
+})();
+
+/* ---------------- where it sits ---------------- */
+
+(function () {
+  const col = { left: 500, top: 60, width: 400, height: 2000, right: 900, bottom: 2060 };
+  const pane = { left: 300, top: 60, width: 800, height: 700, right: 1100, bottom: 760 };
+  const spot = defaultSpot(col, pane, 44);
+  check('by default it stands beside the column, not over the words', spot.left >= col.right);
+  check('close beside it, not adrift in the margin', spot.left === col.right + GAP);
+  check('and below the line being read, not level with it', spot.top > pane.top + pane.height / 2);
+  check('while still inside the pane', spot.top + 44 < pane.bottom);
+})();
+
+(function () {
+  const pane = { left: 0, top: 0, width: 390, height: 700, right: 390, bottom: 700 };
+  const narrow = { left: 0, top: 0, width: 390, height: 3000, right: 390, bottom: 3000 };
+  const at = clampSpot(defaultSpot(narrow, pane, 44), pane, 44);
+  check('where the column fills the screen there is no margin to stand in', at.left + 44 <= pane.right);
+  check('so it comes inside rather than off the edge', at.left >= GAP);
+  check('and stays clear of the bottom, where the toolbar lives', at.top + 44 <= pane.bottom);
+})();
+
+(function () {
+  const pane = { left: 300, top: 60, width: 800, height: 700, right: 1100, bottom: 760 };
+  const stranded = clampSpot({ left: 4000, top: 4000 }, pane, 44);
+  check('a position remembered from a larger screen is brought back', stranded.left + 44 <= pane.right);
+  check('in both directions', stranded.top + 44 <= pane.bottom);
+  const above = clampSpot({ left: -900, top: -900 }, pane, 44);
+  check('and back from the other side too', above.left >= GAP && above.top >= pane.top);
+  const pinched = clampSpot({ left: 0, top: 0 }, { left: 0, top: 0, width: 10, height: 10, right: 10, bottom: 10 }, 44);
+  check('a pane too small for the button still gives an answer', typeof pinched.left === 'number');
+})();
+
+check('a finger that has barely moved was pressing', isDrag(2, 2) === false);
+check('one that has travelled was moving it', isDrag(40, 0) === true);
+check('in either direction', isDrag(0, -40) === true);
+
+check('a phone and a desktop remember separately', spotKey(true) !== spotKey(false));
+
+/* ---------------- pressing, holding, dragging ---------------- */
+
+function pressAt(p, x, y) {
+  p.button.fire('pointerdown', { clientX: x, clientY: y });
+}
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  const at = p.at;
+  check('the button is placed as soon as it exists', !!at);
+  check('beside the column', at.left >= app.view.column.getBoundingClientRect().right);
+  check('and it is told where to stand in absolute terms', p.button.props.left === at.left + 'px');
+  check('with the corner anchoring let go of', p.button.props.bottom === 'auto');
+})();
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  p.stack = [{ kind: 'within', path: 'a.md', state: { scroll: 7 } }];
+  p.render();
+  const start = p.at;
+  pressAt(p, start.left + 22, start.top + 22);
+  p.button.fire('pointermove', { clientX: start.left + 24, clientY: start.top + 23 });
+  p.button.fire('pointerup', { clientX: start.left + 24, clientY: start.top + 23 });
+  p.button.fire('click');
+  eq('a press that barely moves is still a press', app.view.applied, { scroll: 7 });
+})();
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  p.stack = [{ kind: 'within', path: 'a.md', state: { scroll: 7 } }];
+  p.render();
+  const start = p.at;
+  pressAt(p, start.left + 22, start.top + 22);
+  p.button.fire('pointermove', { clientX: start.left + 22 - 200, clientY: start.top + 22 - 100 });
+  check('dragging moves it', p.at.left < start.left);
+  check('by about as far as the finger went', Math.abs((start.left - p.at.left) - 200) < 2);
+  p.button.fire('pointerup', { clientX: start.left + 22 - 200, clientY: start.top + 22 - 100 });
+  p.button.fire('click');
+  check('and a drag is not taken as a press', app.view.applied === undefined);
+  check('the move it was holding is still there', p.stack.length === 1);
+
+  const moved = p.at;
+  const second = boot('a.md', { scroll: 10 });
+  eq('where it was left is where it comes back', second.p.at, moved);
+})();
+
+(function () {
+  const { p } = boot('a.md', { scroll: 10 });
+  const start = p.at;
+  pressAt(p, start.left + 22, start.top + 22);
+  p.button.fire('pointermove', { clientX: start.left + 22 - 300, clientY: start.top + 22 });
+  p.button.fire('pointerup', { clientX: start.left + 22 - 300, clientY: start.top + 22 });
+  const dragged = p.at.left;
+  const reset = p.commands.filter((c) => c.id === 'reset-position')[0];
+  check('there is a way to put it back', !!reset);
+  reset.callback();
+  check('and it goes back beside the column', p.at.left > dragged);
+  window.localStorage.clear();
+})();
+
+(function () {
+  window.localStorage.clear();
+  const { p } = boot('a.md', { scroll: 10 });
+  const start = p.at;
+  pressAt(p, start.left + 22, start.top + 22);
+  p.button.fire('pointermove', { clientX: start.left + 22 - 150, clientY: start.top + 22 });
+  p.button.fire('pointerup', { clientX: start.left + 22 - 150, clientY: start.top + 22 });
+  const onDesktop = p.at.left;
+
+  Platform.isMobile = true;
+  const phone = boot('a.md', { scroll: 10 });
+  check(
+    'a position measured on the desktop is not handed to the phone',
+    phone.p.at.left !== onDesktop
+  );
+  Platform.isMobile = false;
+  const back = boot('a.md', { scroll: 10 });
+  check('and the desktop keeps its own', back.p.at.left === onDesktop);
+  window.localStorage.clear();
+})();
+
+(function () {
+  const before = Notice.all.length;
+  const { p } = boot('a.md', { scroll: 10 });
+  p.stack = [{ kind: 'within', path: 'a.md', state: { scroll: 7 } }];
+  p.render();
+  const start = p.at;
+  pressAt(p, start.left + 22, start.top + 22);
+  check('holding is timed, not answered at once', Notice.all.length === before);
+  p.button.fire('pointermove', { clientX: start.left + 222, clientY: start.top + 22 });
+  p.button.fire('pointerup', { clientX: start.left + 222, clientY: start.top + 22 });
+  check('and a drag never becomes a hold', Notice.all.length === before);
+  window.localStorage.clear();
+})();
+
+(function () {
+  const { p } = boot('a.md', { scroll: 10 });
+  p.button.fire('pointerdown', { clientX: 0, clientY: 0 });
+  p.onunload();
+  check('unloading in the middle of a press leaves no timer behind', p.pressTimer === 0);
+})();
+
+(function () {
+  const app = makeApp('a.md', { scroll: 0 });
+  app.view.contentEl = null;
+  const p = new BacktrackPlugin(app, { dir: 'plugins/backtrack' });
+  p.onload();
+  check('with nothing to measure, placing is skipped rather than guessed', p.at === null);
+  check('and the button still exists', !!p.button);
 })();
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');

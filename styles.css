@@ -9,10 +9,11 @@
   position: fixed;
   right: calc(env(safe-area-inset-right, 0px) + 16px);
 
-  /* The bottom right corner is not empty. On the desktop the status bar
-   * lives there, so the button is lifted clear of it. This is a measured
-   * number and measured numbers do not survive a change of medium, which is
-   * why the phone gets its own below rather than inheriting this one. */
+  /* Where it actually stands is set from script, beside the column of text,
+   * and moved by dragging. These corner values are only what is used when
+   * there is nothing to measure - no note open, or a view that cannot be
+   * asked for its box. The bottom right corner is not empty on the desktop,
+   * so even the fallback clears the status bar. */
   bottom: calc(env(safe-area-inset-bottom, 0px) + 44px);
 
   /* 44px is the smallest target a finger can be relied on to hit. */
@@ -31,6 +32,10 @@
 
   cursor: pointer;
   z-index: var(--layer-notice, 60);
+
+  /* Dragging the button must move the button, not scroll the note underneath
+   * it. Without this the finger takes the page with it. */
+  touch-action: none;
 
   /* A long press should offer to go back, not to select text or to hand the
    * page to the browser's own menu. */

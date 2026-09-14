@@ -14,7 +14,16 @@ class El {
     this.children = [];
     this.attrs = {};
     this.text = '';
-    this.style = { setProperty: () => {} };
+    this.props = {};
+    const props = this.props;
+    this.style = {
+      setProperty(k, v) { props[k] = v; },
+      getPropertyValue(k) { return props[k]; },
+    };
+    /* A box, so a test can show where a thing actually ended up. A stub where
+     * everything is zero-sized cannot show that the button was put beside the
+     * column rather than on top of it. */
+    this.box = { left: 0, top: 0, width: 44, height: 44 };
     this.isConnected = true;
     this.on = {};
     this.parent = null;
@@ -49,6 +58,39 @@ class El {
   remove() {
     this.detach();
     if (this.parent) this.parent.children = this.parent.children.filter((c) => c !== this);
+  }
+
+  getBoundingClientRect() {
+    const b = this.box;
+    return {
+      left: b.left,
+      top: b.top,
+      width: b.width,
+      height: b.height,
+      right: b.left + b.width,
+      bottom: b.top + b.height,
+    };
+  }
+  setBox(left, top, width, height) {
+    this.box = { left: left, top: top, width: width, height: height };
+    return this;
+  }
+  setPointerCapture() {}
+  releasePointerCapture() {}
+  querySelector(sel) {
+    const parts = String(sel).split(',').map((x) => x.trim().replace(/^\./, '')).filter(Boolean);
+    return this.find((e) => parts.some((c) => e.hasClass(c)))[0] || null;
+  }
+
+  /* Send one event straight at this element, with whatever the handler will
+   * read off it. */
+  fire(type, props) {
+    const ev = Object.assign(
+      { target: this, preventDefault: () => {}, stopPropagation: () => {}, pointerId: 1 },
+      props || {}
+    );
+    for (const fn of (this.on[type] || []).slice()) fn(ev);
+    return ev;
   }
 
   addEventListener(type, fn) {
@@ -111,9 +153,18 @@ function install() {
     createElement: (t) => new El(t),
     createElementNS: () => new El('svg'),
   };
+  const store = {};
   global.window = {
     setTimeout: (fn, ms) => setTimeout(fn, ms),
     clearTimeout: (id) => clearTimeout(id),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    localStorage: {
+      getItem(k) { return store[k] === undefined ? null : store[k]; },
+      setItem(k, v) { store[k] = String(v); },
+      removeItem(k) { delete store[k]; },
+      clear() { for (const k of Object.keys(store)) delete store[k]; },
+    },
   };
   return { El: El, body: body };
 }
