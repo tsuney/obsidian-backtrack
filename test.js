@@ -31,6 +31,7 @@ const {
   pushEntry,
   nextUsable,
   peekUsable,
+  usableHere,
   defaultSpot,
   clampSpot,
   isDrag,
@@ -123,33 +124,49 @@ check('with nowhere to be there is nothing to say either', classify('a.md', null
 /* ---------------- nextUsable ---------------- */
 
 (function () {
-  const within = (p) => ({ kind: 'within', path: p });
-  const across = { kind: 'across', path: 'x.md' };
+  const L = { id: 'pane-1' };
+  const other = { id: 'pane-2' };
+  const within = (p, leaf) => ({ kind: 'within', path: p, leaf: leaf || L });
+  const across = { kind: 'across', path: 'x.md', leaf: L };
+  const at = (p, leaf) => ({ path: p, leaf: leaf || L, canGoBack: true });
 
-  let r = nextUsable([within('a.md')], 'a.md');
+  let r = nextUsable([within('a.md')], at('a.md'));
   check('an entry for the note on screen is usable', r.entry && r.entry.path === 'a.md');
   check('and nothing is left under it', r.rest.length === 0);
 
-  r = nextUsable([within('a.md'), within('b.md')], 'a.md');
+  r = nextUsable([within('a.md'), within('b.md')], at('a.md'));
   check(
     'an entry naming a note we are no longer in is dropped, not applied',
     r.entry && r.entry.path === 'a.md'
   );
   check('and it is gone rather than kept for next time', r.rest.length === 0);
 
-  r = nextUsable([across, within('b.md')], 'a.md');
-  check('an entry handed to Obsidian is usable wherever we are', r.entry === across);
+  r = nextUsable([across, within('b.md')], at('a.md'));
+  check('an entry handed to Obsidian is usable anywhere in its own pane', r.entry === across);
 
-  r = nextUsable([within('b.md'), within('c.md')], 'a.md');
+  r = nextUsable([across], at('a.md', other));
+  check(
+    'but not once the pane it was made in is gone, or we are in another',
+    r.entry === null
+  );
+  check('and it is not left behind to be pressed again', r.rest.length === 0);
+
+  r = nextUsable([within('a.md', other)], at('a.md'));
+  check('the same note in a different pane is not the same place', r.entry === null);
+
+  r = nextUsable([within('b.md'), within('c.md')], at('a.md'));
   check('when none of them fit, nothing is returned', r.entry === null);
   check('and the stack is emptied rather than left stale', r.rest.length === 0);
 
-  r = nextUsable([], 'a.md');
+  r = nextUsable([], at('a.md'));
   check('an empty stack gives nothing', r.entry === null);
 
   const original = [within('a.md')];
-  nextUsable(original, 'a.md');
+  nextUsable(original, at('a.md'));
   check('and the stack it was given is left alone', original.length === 1);
+
+  check('usableHere says no to nothing at all', usableHere(null, at('a.md')) === false);
+  check('and to being nowhere', usableHere(within('a.md'), null) === false);
 })();
 
 /* ---------------- describeEntry ---------------- */
@@ -195,8 +212,10 @@ function makeApp(path, state) {
   pane.setBox(300, 60, 800, 700);
   const column = pane.make('div', { cls: 'markdown-preview-sizer' });
   column.setBox(500, 60, 400, 2000);
+  const leaf = { id: 'leaf-' + path, history: { backHistory: [{}], forwardHistory: [] } };
   const view = {
     file: file,
+    leaf: leaf,
     contentEl: pane,
     pane: pane,
     column: column,
@@ -250,7 +269,7 @@ function clickThen(p, anchorEl) {
 }
 
 (function () {
-  const { p } = boot('a.md');
+  const { app, p } = boot('a.md');
   const capture = p.domEvents.filter((e) => e.type === 'click')[0];
   check('the click handler is installed', !!capture);
   check(
@@ -261,7 +280,7 @@ function clickThen(p, anchorEl) {
 })();
 
 (function () {
-  const { p } = boot('a.md');
+  const { app, p } = boot('a.md');
   check('the button exists as soon as the layout is ready', !!p.button);
   check('and it is in the document', !!p.button && p.button.isConnected === true);
   check('but not showing, because there is nothing to undo', !p.button.hasClass('is-visible'));
@@ -293,6 +312,8 @@ function clickThen(p, anchorEl) {
   clickThen(p, link.inner);
   app.view = {
     file: { path: 'b.md' },
+    leaf: app.view.leaf,
+    contentEl: app.view.contentEl,
     state: { scroll: 0 },
     getEphemeralState() { return this.state; },
     setEphemeralState(s) { this.applied = s; },
@@ -308,7 +329,7 @@ function clickThen(p, anchorEl) {
 })();
 
 (function () {
-  const { p } = boot('a.md', { scroll: 10 });
+  const { app, p } = boot('a.md', { scroll: 10 });
   const link = makeLink('cm-hmd-internal-link', null);
   clickThen(p, link.inner);
   p.settle();
@@ -319,8 +340,8 @@ function clickThen(p, anchorEl) {
 (function () {
   const { app, p } = boot('a.md', { scroll: 10 });
   p.stack = [
-    { kind: 'within', path: 'a.md', state: { scroll: 1 } },
-    { kind: 'within', path: 'gone.md', state: { scroll: 99 } },
+    { kind: 'within', path: 'a.md', leaf: app.view.leaf, state: { scroll: 1 } },
+    { kind: 'within', path: 'gone.md', leaf: app.view.leaf, state: { scroll: 99 } },
   ];
   p.render();
   p.goBack();
@@ -334,7 +355,7 @@ function clickThen(p, anchorEl) {
 
 (function () {
   const { app, p } = boot('a.md', { scroll: 10 });
-  p.stack = [{ kind: 'within', path: 'gone.md', state: { scroll: 99 } }];
+  p.stack = [{ kind: 'within', path: 'gone.md', leaf: app.view.leaf, state: { scroll: 99 } }];
   p.render();
   const answered = p.goBack();
   check('when nothing fits, the press honestly does nothing', answered === false);
@@ -344,7 +365,7 @@ function clickThen(p, anchorEl) {
 
 (function () {
   const { app, p } = boot('a.md', { scroll: 10 });
-  p.stack = [{ kind: 'within', path: 'a.md', state: { scroll: 7 } }];
+  p.stack = [{ kind: 'within', path: 'a.md', leaf: app.view.leaf, state: { scroll: 7 } }];
   p.render();
   p.button.press('click');
   eq('the button itself is wired, not just the command', app.view.applied, { scroll: 7 });
@@ -352,8 +373,8 @@ function clickThen(p, anchorEl) {
 
 (function () {
   const before = Notice.all.length;
-  const { p } = boot('a.md', { scroll: 10 });
-  p.stack = [{ kind: 'within', path: 'a.md', state: { scroll: 7 } }];
+  const { app, p } = boot('a.md', { scroll: 10 });
+  p.stack = [{ kind: 'within', path: 'a.md', leaf: app.view.leaf, state: { scroll: 7 } }];
   p.render();
   p.button.press('contextmenu');
   check('a long press says where it would take you', Notice.all.length === before + 1);
@@ -361,7 +382,7 @@ function clickThen(p, anchorEl) {
 })();
 
 (function () {
-  const { p } = boot('a.md');
+  const { app, p } = boot('a.md');
   const el = p.button;
   p.onunload();
   check('unloading takes the button out of the document', el.isConnected === false);
@@ -372,7 +393,7 @@ function clickThen(p, anchorEl) {
 (function () {
   const { app, p } = boot('a.md', { scroll: 0 });
   for (let i = 0; i < 15; i++) {
-    p.stack = m.pushEntry(p.stack, { kind: 'within', path: 'a.md', state: { scroll: i } }, MAX_ENTRIES);
+    p.stack = m.pushEntry(p.stack, { kind: 'within', path: 'a.md', leaf: app.view.leaf, state: { scroll: i } }, MAX_ENTRIES);
   }
   check('a long read does not grow the stack for ever', p.stack.length === MAX_ENTRIES);
   p.render();
@@ -383,24 +404,27 @@ function clickThen(p, anchorEl) {
 /* ---------------- peekUsable does not consume ---------------- */
 
 (function () {
-  const stack = [{ kind: 'within', path: 'a.md', state: { scroll: 1 } }];
-  check('peeking finds the entry', peekUsable(stack, 'a.md') === stack[0]);
+  const L = { id: 'pane-1' };
+  const stack = [{ kind: 'within', path: 'a.md', leaf: L, state: { scroll: 1 } }];
+  check('peeking finds the entry', peekUsable(stack, { path: 'a.md', leaf: L, canGoBack: true }) === stack[0]);
   check('and leaves it where it was', stack.length === 1);
-  check('an entry for another note is not offered here', peekUsable(stack, 'b.md') === null);
+  check('an entry for another note is not offered here', peekUsable(stack, { path: 'b.md', leaf: L, canGoBack: true }) === null);
   check('but it is still not thrown away', stack.length === 1);
-  check('nothing to peek at is not a crash', peekUsable([], 'a.md') === null);
+  check('nothing to peek at is not a crash', peekUsable([], { path: 'a.md', leaf: L, canGoBack: true }) === null);
 })();
 
 /* ---------------- a button that would do nothing is not shown --------- */
 
 (function () {
   const { app, p } = boot('a.md', { scroll: 10 });
-  p.stack = [{ kind: 'within', path: 'a.md', state: { scroll: 7 } }];
+  p.stack = [{ kind: 'within', path: 'a.md', leaf: app.view.leaf, state: { scroll: 7 } }];
   p.render();
   check('with something to undo here, the button shows', p.button.hasClass('is-visible'));
 
   app.view = {
     file: { path: 'elsewhere.md' },
+    leaf: app.view.leaf,
+    contentEl: app.view.contentEl,
     state: { scroll: 0 },
     getEphemeralState() { return this.state; },
     setEphemeralState(s) { this.applied = s; },
@@ -414,6 +438,8 @@ function clickThen(p, anchorEl) {
 
   app.view = {
     file: { path: 'a.md' },
+    leaf: app.view.leaf,
+    contentEl: app.view.contentEl,
     state: { scroll: 0 },
     getEphemeralState() { return this.state; },
     setEphemeralState(s) { this.applied = s; },
@@ -425,7 +451,7 @@ function clickThen(p, anchorEl) {
 })();
 
 (function () {
-  const { p } = boot('a.md');
+  const { app, p } = boot('a.md');
   const names = p.domEvents.length;
   check('the view being changed is listened for', names >= 0);
   check('and the button asks again when it happens', typeof p.render === 'function');
@@ -440,6 +466,8 @@ function clickThen(p, anchorEl) {
   clickThen(p, link.inner);
   app.view = {
     file: { path: 'b.md' },
+    leaf: app.view.leaf,
+    contentEl: app.view.contentEl,
     state: { scroll: 0 },
     getEphemeralState() { return this.state; },
     setEphemeralState(s) { this.applied = s; },
@@ -457,7 +485,7 @@ function clickThen(p, anchorEl) {
   app.commands = {};
   const link = makeLink('internal-link', 'Other Note');
   clickThen(p, link.inner);
-  app.view = { file: { path: 'b.md' }, state: {}, getEphemeralState() { return this.state; } };
+  app.view = { file: { path: 'b.md' }, leaf: app.view.leaf, state: {}, getEphemeralState() { return this.state; } };
   p.settle();
   check('and the same when the command machinery is gone entirely', p.stack.length === 0);
 })();
@@ -550,7 +578,7 @@ function pressAt(p, x, y) {
 
 (function () {
   const { app, p } = boot('a.md', { scroll: 10 });
-  p.stack = [{ kind: 'within', path: 'a.md', state: { scroll: 7 } }];
+  p.stack = [{ kind: 'within', path: 'a.md', leaf: app.view.leaf, state: { scroll: 7 } }];
   p.render();
   const start = p.at;
   pressAt(p, start.left + 22, start.top + 22);
@@ -562,7 +590,7 @@ function pressAt(p, x, y) {
 
 (function () {
   const { app, p } = boot('a.md', { scroll: 10 });
-  p.stack = [{ kind: 'within', path: 'a.md', state: { scroll: 7 } }];
+  p.stack = [{ kind: 'within', path: 'a.md', leaf: app.view.leaf, state: { scroll: 7 } }];
   p.render();
   const start = p.at;
   pressAt(p, start.left + 22, start.top + 22);
@@ -580,7 +608,7 @@ function pressAt(p, x, y) {
 })();
 
 (function () {
-  const { p } = boot('a.md', { scroll: 10 });
+  const { app, p } = boot('a.md', { scroll: 10 });
   const start = p.at;
   pressAt(p, start.left + 22, start.top + 22);
   p.button.fire('pointermove', { clientX: start.left + 22 - 300, clientY: start.top + 22 });
@@ -595,7 +623,7 @@ function pressAt(p, x, y) {
 
 (function () {
   window.localStorage.clear();
-  const { p } = boot('a.md', { scroll: 10 });
+  const { app, p } = boot('a.md', { scroll: 10 });
   const start = p.at;
   pressAt(p, start.left + 22, start.top + 22);
   p.button.fire('pointermove', { clientX: start.left + 22 - 150, clientY: start.top + 22 });
@@ -616,8 +644,8 @@ function pressAt(p, x, y) {
 
 (function () {
   const before = Notice.all.length;
-  const { p } = boot('a.md', { scroll: 10 });
-  p.stack = [{ kind: 'within', path: 'a.md', state: { scroll: 7 } }];
+  const { app, p } = boot('a.md', { scroll: 10 });
+  p.stack = [{ kind: 'within', path: 'a.md', leaf: app.view.leaf, state: { scroll: 7 } }];
   p.render();
   const start = p.at;
   pressAt(p, start.left + 22, start.top + 22);
@@ -629,7 +657,7 @@ function pressAt(p, x, y) {
 })();
 
 (function () {
-  const { p } = boot('a.md', { scroll: 10 });
+  const { app, p } = boot('a.md', { scroll: 10 });
   p.button.fire('pointerdown', { clientX: 0, clientY: 0 });
   p.onunload();
   check('unloading in the middle of a press leaves no timer behind', p.pressTimer === 0);
@@ -642,6 +670,225 @@ function pressAt(p, x, y) {
   p.onload();
   check('with nothing to measure, placing is skipped rather than guessed', p.at === null);
   check('and the button still exists', !!p.button);
+})();
+
+/* ---------------- the note is closed while the move is remembered ------ */
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  const first = app.view.leaf;
+  const link = makeLink('internal-link', 'Other Note');
+  clickThen(p, link.inner);
+  app.view = {
+    file: { path: 'b.md' },
+    leaf: first,
+    contentEl: app.view.contentEl,
+    state: { scroll: 0 },
+    getEphemeralState() { return this.state; },
+    setEphemeralState(s) { this.applied = s; },
+  };
+  p.settle();
+  check('the move across is remembered', p.stack.length === 1);
+  check('and offered while we are still in that pane', p.button.hasClass('is-visible'));
+
+  /* The reader closes the tab. Obsidian puts them in a different pane, and
+   * the history that knew how to go back went with the one they closed. */
+  app.view = {
+    file: { path: 'c.md' },
+    leaf: { id: 'another-pane', history: { backHistory: [], forwardHistory: [] } },
+    contentEl: app.view.contentEl,
+    state: { scroll: 0 },
+    getEphemeralState() { return this.state; },
+    setEphemeralState(s) { this.applied = s; },
+  };
+  app.workspace.fire('active-leaf-change');
+  check(
+    'closing the note takes the button with it, rather than leaving one that errs',
+    !p.button.hasClass('is-visible')
+  );
+  const answered = p.goBack();
+  check('and pressing the command finds nothing to do, quietly', answered === false);
+  eq('having asked Obsidian for nothing', app.commands.executed, []);
+})();
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  const origin = app.view.leaf;
+  const link = makeLink('internal-link', 'Other Note');
+  clickThen(p, link.inner);
+  /* Opened in a new tab: the note we came from is still sitting there. */
+  app.view = {
+    file: { path: 'b.md' },
+    leaf: { id: 'new-tab', history: { backHistory: [], forwardHistory: [] } },
+    contentEl: app.view.contentEl,
+    state: { scroll: 0 },
+    getEphemeralState() { return this.state; },
+    setEphemeralState(s) { this.applied = s; },
+  };
+  p.settle();
+  check(
+    'a link opened in a new tab leaves nothing to undo, because nothing moved',
+    p.stack.length === 0
+  );
+  check('so no button appears in the new tab', !p.button.hasClass('is-visible'));
+  check('and the pane we came from is untouched', origin !== app.view.leaf);
+})();
+
+/* ---------------- a column that has not been laid out yet ------------- */
+
+(function () {
+  const app = makeApp('a.md', { scroll: 0 });
+  app.view.column.setBox(0, 0, 0, 0);
+  const p = new BacktrackPlugin(app, { dir: 'plugins/backtrack' });
+  p.onload();
+  p.stack = [{ kind: 'within', path: 'a.md', leaf: app.view.leaf, state: { scroll: 1 } }];
+  p.render();
+  const pane = app.view.pane.getBoundingClientRect();
+  check(
+    'a column of nothing does not push the button against the left edge',
+    p.at.left > pane.left
+  );
+  check('it falls back to the pane, which does have a box', p.at.left + 44 <= pane.right);
+  window.localStorage.clear();
+})();
+
+(function () {
+  const app = makeApp('a.md', { scroll: 0 });
+  const p = new BacktrackPlugin(app, { dir: 'plugins/backtrack' });
+  /* Nothing is laid out at load, as when the plugin is switched on with a
+   * note already open and no event follows. */
+  app.view.pane.setBox(0, 0, 0, 0);
+  p.onload();
+  check('nothing is placed while there is nothing to measure', p.at === null);
+  app.view.pane.setBox(300, 60, 800, 700);
+  p.stack = [{ kind: 'within', path: 'a.md', leaf: app.view.leaf, state: { scroll: 1 } }];
+  p.render();
+  check('and it is measured when it is about to be seen', !!p.at);
+  check('landing beside the column, not at the window edge', p.at.left > 300);
+  window.localStorage.clear();
+})();
+
+/* ---------------- asking before offering ---------------- */
+
+(function () {
+  const L = { id: 'p', history: { backHistory: [], forwardHistory: [] } };
+  const across = { kind: 'across', path: 'a.md', leaf: L };
+  check(
+    'a handed-back move is not offered when Obsidian has nowhere to go',
+    usableHere(across, { path: 'b.md', leaf: L, canGoBack: false }) === false
+  );
+  check(
+    'and is offered when it has',
+    usableHere(across, { path: 'b.md', leaf: L, canGoBack: true }) === true
+  );
+  const within = { kind: 'within', path: 'a.md', leaf: L };
+  check(
+    'a move we restore ourselves does not depend on Obsidian at all',
+    usableHere(within, { path: 'a.md', leaf: L, canGoBack: false }) === true
+  );
+})();
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  const leaf = app.view.leaf;
+  const link = makeLink('internal-link', 'Other Note');
+  clickThen(p, link.inner);
+  app.view = {
+    file: { path: 'b.md' },
+    leaf: leaf,
+    contentEl: app.view.contentEl,
+    state: { scroll: 0 },
+    getEphemeralState() { return this.state; },
+    setEphemeralState(s) { this.applied = s; },
+  };
+  p.settle();
+  check('the move across is offered while the pane has history', p.button.hasClass('is-visible'));
+
+  /* The reader presses Obsidian's own back button. Its history is spent;
+   * ours still holds a note of the same move. */
+  leaf.history.backHistory = [];
+  app.workspace.fire('file-open');
+  check(
+    'once Obsidian has spent its history the button goes, rather than erring',
+    !p.button.hasClass('is-visible')
+  );
+  check('and pressing finds nothing to hand over', p.goBack() === false);
+  eq('so Obsidian is never asked to do the impossible', app.commands.executed, []);
+})();
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  app.view.leaf.history = null;
+  const commands = app.commands;
+  commands.commands[GO_BACK_COMMAND] = { checkCallback: () => false };
+  const here = p.here();
+  check('with no history to read, the command is asked instead', here.canGoBack === false);
+  commands.commands[GO_BACK_COMMAND] = { checkCallback: () => true };
+  check('and believed either way', p.here().canGoBack === true);
+  delete commands.commands[GO_BACK_COMMAND].checkCallback;
+  check('when nothing can be asked, we assume yes rather than go silent', p.here().canGoBack === true);
+})();
+
+/* ---------------- lighting the link you came from ---------------- */
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  const link = makeLink('internal-link', '#Heading');
+  clickThen(p, link.inner);
+  app.view.state = { scroll: 400 };
+  p.settle();
+  check('the link itself is kept with the move', p.stack[0].el === link.anchor);
+  p.goBack();
+  check('and is lit when you land back on it', link.anchor.hasClass('backtrack-flash'));
+})();
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  const link = makeLink('internal-link', '#Heading');
+  clickThen(p, link.inner);
+  app.view.state = { scroll: 400 };
+  p.settle();
+  /* The note was redrawn while we were away, so the link we kept is an
+   * orphan with nothing on screen to light. */
+  link.anchor.detach();
+  check('an orphaned link is not lit', p.flash(link.anchor) === false);
+  check('and nothing at all is not a crash', p.flash(null) === false);
+  p.goBack();
+  eq('while the position is still put back', app.view.applied, { scroll: 10 });
+})();
+
+/* ---------------- footnotes ---------------- */
+
+(function () {
+  /* Reading view puts the reference in a <sup class="footnote-ref"> holding
+   * an <a class="footnote-link">, and the note at the bottom ends with an
+   * <a class="footnote-backref">. */
+  const sup = new El('sup');
+  sup.className = 'footnote-ref';
+  const a = sup.make('a', { cls: 'footnote-link', text: '[1]' });
+  a.setAttr('href', '#fn-1-abc');
+  check('a footnote reference is a link we catch', a.closest(LINK_SELECTOR) === a);
+  check('and so is the sup around it', sup.closest(LINK_SELECTOR) === sup);
+
+  const back = new El('a');
+  back.className = 'footnote-backref footnote-link';
+  check('the arrow back out of a footnote counts too', back.closest(LINK_SELECTOR) === back);
+})();
+
+(function () {
+  const { app, p } = boot('論文ノート.md', { scroll: 120 });
+  const sup = new El('sup');
+  sup.className = 'footnote-ref';
+  const a = sup.make('a', { cls: 'footnote-link', text: '[1]' });
+  a.setAttr('data-href', '#fn-1-abc');
+  clickThen(p, a);
+  app.view.state = { scroll: 4200 };
+  p.settle();
+  check('jumping to a footnote is remembered', p.stack.length === 1);
+  check('as a move inside the note', p.stack[0].kind === 'within');
+  p.goBack();
+  eq('and takes you back to the sentence you were reading', app.view.applied, { scroll: 120 });
+  check('with the reference lit so you can find your line', a.hasClass('backtrack-flash'));
 })();
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');

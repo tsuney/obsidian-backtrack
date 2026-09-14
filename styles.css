@@ -25,10 +25,16 @@
   justify-content: center;
 
   border-radius: 50%;
-  border: 1px solid var(--background-modifier-border);
-  background-color: var(--background-secondary);
-  color: var(--text-muted);
-  box-shadow: var(--shadow-s, 0 2px 8px rgba(0, 0, 0, 0.18));
+  border: none;
+
+  /* The accent colour, carried by the shape and not by any text. The theme's
+   * accent says "this is the thing to press" and nothing about what size or
+   * background it is safe on, so it fills the disc while the glyph takes the
+   * colour the theme pairs with it. A button that has to be found is the one
+   * case where being quiet is the wrong answer. */
+  background-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+  box-shadow: var(--shadow-s, 0 2px 8px rgba(0, 0, 0, 0.24));
 
   cursor: pointer;
   z-index: var(--layer-notice, 60);
@@ -50,8 +56,7 @@
 }
 
 .backtrack-fab:hover {
-  color: var(--text-normal);
-  background-color: var(--background-modifier-hover);
+  background-color: var(--interactive-accent-hover, var(--interactive-accent));
 }
 
 .backtrack-fab:active {
@@ -76,4 +81,24 @@
 
 .is-mobile.is-keyboard-shown .backtrack-fab {
   bottom: calc(env(safe-area-inset-bottom, 0px) + 96px);
+}
+
+/*
+ * The link you came from, lit for a moment when you land back on it.
+ *
+ * A ring around the words rather than a block of colour behind them: the text
+ * keeps the colour the theme gave it, and the accent is carried by the shape,
+ * which is the one place it is safe at any size. It fades of its own accord,
+ * because a mark that stays becomes part of the note.
+ */
+.backtrack-flash {
+  border-radius: 4px;
+  box-shadow: 0 0 0 2px var(--interactive-accent);
+  animation: backtrack-fade 1.4s ease-out forwards;
+}
+
+@keyframes backtrack-fade {
+  0% { box-shadow: 0 0 0 3px var(--interactive-accent); }
+  70% { box-shadow: 0 0 0 2px var(--interactive-accent); }
+  100% { box-shadow: 0 0 0 0 transparent; }
 }

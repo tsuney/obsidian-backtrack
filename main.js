@@ -47,6 +47,10 @@ const VERIFY_MS = 300;
 
 const LONG_PRESS_MS = 450;
 
+/* How long the link you came from stays lit after you land back on it. Long
+ * enough to find with the eye, short enough not to become part of the page. */
+const FLASH_MS = 1400;
+
 /* How far a finger may wander before it is a drag rather than a press. */
 const DRAG_SLOP = 6;
 
@@ -61,8 +65,16 @@ const DOWN_THE_PAGE = 0.62;
 
 /* Reading view renders an <a class="internal-link">; Live Preview renders a
  * span pair, the outer of which carries cm-hmd-internal-link. Clicks land on
- * inner spans in both, so these are matched with closest(). */
-const LINK_SELECTOR = '.internal-link,.cm-hmd-internal-link';
+ * inner spans in both, so these are matched with closest().
+ *
+ * Footnotes are here too, and they are not internal links: they carry their
+ * own classes. They are the case this plugin exists for in miniature - the
+ * reference sits mid-sentence and the note sits at the very bottom of the
+ * page - so leaving them out would be leaving out the obvious one. Obsidian
+ * does put a small arrow at the end of each footnote to get back, but only
+ * from the footnote, and only when the reader notices it is there. */
+const LINK_SELECTOR =
+  '.internal-link,.cm-hmd-internal-link,.footnote-link,.footnote-ref,.footnote-backref,.cm-footref';
 
 /* Obsidian's own back command. This id is not part of the public API, so it
  * is recorded as a dependency in the project note, and success is judged by
@@ -135,12 +147,27 @@ function pushEntry(stack, entry, max) {
  * rather than kept, because a stale entry that survives will be just as wrong
  * the next time. Entries handed to Obsidian carry no file of their own and
  * are always usable. */
-function nextUsable(stack, currentPath) {
+function usableHere(entry, here) {
+  if (!entry || !here) return false;
+  /* The move belongs to the pane it was made in. Close that pane, or step
+   * into another one, and the move has nothing left to act on: Obsidian's
+   * own history went with the pane, and a note restored into a different
+   * pane is not where the reader was. */
+  if (entry.leaf !== here.leaf) return false;
+  /* A move we handed to Obsidian is only ours to offer while Obsidian still
+   * has somewhere to go. Our note of the move and its history are two
+   * records of one thing and they drift apart: press its own back button,
+   * close a tab, and ours is left pointing at nothing. Asking first is the
+   * difference between not offering a move and apologising for one. */
+  if (entry.kind === 'across') return !!here.canGoBack;
+  return entry.path === here.path;
+}
+
+function nextUsable(stack, here) {
   const rest = stack.slice();
   while (rest.length) {
     const entry = rest.pop();
-    if (entry.kind === 'across') return { entry: entry, rest: rest };
-    if (entry.path === currentPath) return { entry: entry, rest: rest };
+    if (usableHere(entry, here)) return { entry: entry, rest: rest };
   }
   return { entry: null, rest: rest };
 }
@@ -196,11 +223,9 @@ function spotKey(isMobile) {
  * render() needs this and must not consume: a reader who wanders off by hand
  * and comes back should find the button where they left it, not find that
  * looking at the screen threw their place away. */
-function peekUsable(stack, currentPath) {
+function peekUsable(stack, here) {
   for (let i = stack.length - 1; i >= 0; i--) {
-    const entry = stack[i];
-    if (entry.kind === 'across') return entry;
-    if (entry.path === currentPath) return entry;
+    if (usableHere(stack[i], here)) return stack[i];
   }
   return null;
 }
@@ -324,8 +349,13 @@ class BacktrackPlugin extends Plugin {
 
     this.pending = {
       path: view.file.path,
+      leaf: view.leaf,
       state: this.readState(view),
       href: href,
+      /* The link itself, so that coming back can point at it. Held only as
+       * long as the move is: the stack is capped and entries are dropped, so
+       * nothing accumulates. */
+      el: anchor,
     };
 
     if (this.settleTimer) window.clearTimeout(this.settleTimer);
@@ -360,10 +390,21 @@ class BacktrackPlugin extends Plugin {
 
     if (kind === 'across' && !this.canHandBack()) return;
 
+    /* A move made in one pane and landed in another was opened in a new tab.
+     * The pane it came from is still sitting there untouched, so there is
+     * nothing to undo. */
+    if (view.leaf !== pending.leaf) return;
+
     const entry =
       kind === 'across'
-        ? { kind: 'across', path: pending.path }
-        : { kind: 'within', path: pending.path, state: pending.state };
+        ? { kind: 'across', path: pending.path, leaf: pending.leaf, el: pending.el }
+        : {
+            kind: 'within',
+            path: pending.path,
+            leaf: pending.leaf,
+            state: pending.state,
+            el: pending.el,
+          };
 
     this.stack = pushEntry(this.stack, entry, MAX_ENTRIES);
     this.render();
@@ -373,7 +414,7 @@ class BacktrackPlugin extends Plugin {
 
   goBack() {
     const view = this.activeView();
-    const picked = nextUsable(this.stack, this.currentPath());
+    const picked = nextUsable(this.stack, this.here());
     this.stack = picked.rest;
 
     if (!picked.entry) {
@@ -383,6 +424,8 @@ class BacktrackPlugin extends Plugin {
 
     if (picked.entry.kind === 'across') {
       this.handBack();
+      /* The note has to be drawn again before its links exist to be lit. */
+      window.setTimeout(() => this.flash(picked.entry.el), SETTLE_MS);
       this.render();
       return true;
     }
@@ -392,6 +435,7 @@ class BacktrackPlugin extends Plugin {
     } catch (e) {
       new Notice('Backtrack could not restore that position.');
     }
+    this.flash(picked.entry.el);
     this.render();
     return true;
   }
@@ -407,10 +451,31 @@ class BacktrackPlugin extends Plugin {
       commands.executeCommandById(GO_BACK_COMMAND);
     }
     window.setTimeout(() => {
-      if (app.workspace.getActiveFile() === before) {
-        new Notice('Backtrack: Obsidian did not go back. The back command may have changed.');
-      }
+      if (app.workspace.getActiveFile() !== before) return;
+      /* Nothing happened. The entry has already been taken off the stack, so
+       * the button has stopped offering a move it cannot make; say so once
+       * rather than leaving the reader to press again. */
+      this.render();
+      new Notice('Backtrack: Obsidian had nothing left to go back to in this pane.');
     }, VERIFY_MS);
+  }
+
+  /* Light the link you left from.
+   *
+   * Landing back at a position answers where, not why. The link is what the
+   * reader was looking at when they jumped, and pointing at it saves them
+   * finding their own place again.
+   *
+   * Only if it is still there: a note redrawn since the jump has new elements
+   * and the one we kept is an orphan. Lighting an orphan changes nothing the
+   * reader can see, so it is skipped rather than guessed at. */
+  flash(el) {
+    if (!el || el.isConnected === false || typeof el.addClass !== 'function') return false;
+    el.addClass('backtrack-flash');
+    window.setTimeout(() => {
+      if (typeof el.removeClass === 'function') el.removeClass('backtrack-flash');
+    }, FLASH_MS);
+    return true;
   }
 
   /* --- the button -------------------------------------------------- */
@@ -468,10 +533,15 @@ class BacktrackPlugin extends Plugin {
       (typeof host.querySelector === 'function' &&
         host.querySelector('.markdown-preview-sizer, .cm-sizer, .cm-content')) ||
       host;
-    const col =
+    let col =
       inner && typeof inner.getBoundingClientRect === 'function'
         ? inner.getBoundingClientRect()
         : pane;
+    /* A column that has not been laid out yet reports a box of nothing at the
+     * origin, and standing beside that puts the button against the left edge
+     * of the window, far from anything. When the box makes no sense, fall
+     * back to the pane, which does. */
+    if (!col.width || col.right <= pane.left || col.left >= pane.right) col = pane;
     return { pane: pane, col: col };
   }
 
@@ -587,21 +657,56 @@ class BacktrackPlugin extends Plugin {
 
   render() {
     if (!this.button) return;
-    const usable = peekUsable(this.stack, this.currentPath());
+    const usable = peekUsable(this.stack, this.here());
+    const wasShowing = this.button.hasClass('is-visible');
     this.button.toggleClass('is-visible', !!usable);
+    /* Measure when it is about to be seen. Measuring at load asks a pane that
+     * has not been laid out yet, and a jump inside one note raises no event
+     * that would have prompted a second look. */
+    if (usable && !wasShowing) this.place();
     this.button.setAttribute(
       'aria-label',
       usable ? 'Back to ' + describeEntry(usable) : 'Undo the last move'
     );
   }
 
-  currentPath() {
+  /* Where we are, as an entry has to match it: which note, which pane, and
+   * whether Obsidian itself still has anywhere to go back to. */
+  here() {
     const view = this.activeView();
-    return view && view.file ? view.file.path : null;
+    if (!view || !view.file) return { path: null, leaf: null, canGoBack: false };
+    return {
+      path: view.file.path,
+      leaf: view.leaf,
+      canGoBack: this.canGoBackIn(view.leaf),
+    };
+  }
+
+  /* Has Obsidian got a step left in this pane?
+   *
+   * The pane's own history is the thing being asked about, so it is asked
+   * directly. None of these ways in are public API, so each is checked for
+   * before it is used and the last word, when nothing can be asked, is to
+   * assume yes: staying silent about a move that would have worked is worse
+   * than the notice we still print if it turns out not to. */
+  canGoBackIn(leaf) {
+    if (!leaf) return false;
+    const history = leaf.history;
+    if (history && Array.isArray(history.backHistory)) return history.backHistory.length > 0;
+    const commands = this.app && this.app.commands;
+    const known = commands && commands.commands && commands.commands[GO_BACK_COMMAND];
+    if (known && typeof known.checkCallback === 'function') {
+      try {
+        return known.checkCallback(true) !== false;
+      } catch (e) {
+        return true;
+      }
+    }
+    return this.canHandBack();
   }
 
   sayWhere() {
-    const usable = peekUsable(this.stack, this.currentPath());
+    const usable = peekUsable(this.stack, this.here());
     new Notice(usable ? 'Back to ' + describeEntry(usable) : 'Nothing to undo');
   }
 
@@ -644,6 +749,7 @@ module.exports.classify = classify;
 module.exports.pushEntry = pushEntry;
 module.exports.nextUsable = nextUsable;
 module.exports.peekUsable = peekUsable;
+module.exports.usableHere = usableHere;
 module.exports.defaultSpot = defaultSpot;
 module.exports.clampSpot = clampSpot;
 module.exports.isDrag = isDrag;
