@@ -77,6 +77,13 @@ class El {
   }
   setPointerCapture() {}
   releasePointerCapture() {}
+  querySelectorAll(sel) {
+    const parts = String(sel).split(',').map((x) => x.trim().replace(/^\./, '')).filter(Boolean);
+    return this.find((e) => parts.some((c) => e.hasClass(c)));
+  }
+  get textContent() {
+    return [this.text].concat(this.children.map((c) => c.textContent)).join('');
+  }
   querySelector(sel) {
     const parts = String(sel).split(',').map((x) => x.trim().replace(/^\./, '')).filter(Boolean);
     return this.find((e) => parts.some((c) => e.hasClass(c)))[0] || null;

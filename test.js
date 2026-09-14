@@ -227,11 +227,17 @@ function makeApp(path, state) {
   };
   const app = {
     view: view,
+    leaves: [leaf],
+    revealed: null,
+    activated: null,
     handlers: {},
     workspace: {
       getActiveViewOfType: () => app.view,
       getActiveFile: () => (app.view && app.view.file) || null,
       onLayoutReady: (fn) => fn(),
+      iterateAllLeaves(fn) { for (const l of app.leaves) fn(l); },
+      revealLeaf(l) { app.revealed = l; },
+      setActiveLeaf(l) { app.activated = l; },
       on(name, fn) {
         (app.handlers[name] = app.handlers[name] || []).push(fn);
         return { name: name };
@@ -661,6 +667,7 @@ function pressAt(p, x, y) {
   p.button.fire('pointerdown', { clientX: 0, clientY: 0 });
   p.onunload();
   check('unloading in the middle of a press leaves no timer behind', p.pressTimer === 0);
+  check('and none waiting to light a link either', p.flashTimer === 0);
 })();
 
 (function () {
@@ -715,8 +722,9 @@ function pressAt(p, x, y) {
   const { app, p } = boot('a.md', { scroll: 10 });
   const origin = app.view.leaf;
   const link = makeLink('internal-link', 'Other Note');
-  clickThen(p, link.inner);
-  /* Opened in a new tab: the note we came from is still sitting there. */
+  p.onLinkClick({ target: link.inner, metaKey: true });
+  if (p.settleTimer) { clearTimeout(p.settleTimer); p.settleTimer = 0; }
+  /* Opened in a new tab on purpose: the note we came from is still there. */
   app.view = {
     file: { path: 'b.md' },
     leaf: { id: 'new-tab', history: { backHistory: [], forwardHistory: [] } },
@@ -838,8 +846,10 @@ function pressAt(p, x, y) {
   app.view.state = { scroll: 400 };
   p.settle();
   check('the link itself is kept with the move', p.stack[0].el === link.anchor);
-  p.goBack();
-  check('and is lit when you land back on it', link.anchor.hasClass('backtrack-flash'));
+  const entry = p.stack[0];
+  check('going back schedules the light rather than firing it at once', !!p.goBack() && p.flashTimer !== 0);
+  check('and when it fires it finds the link', p.flash(p.findLink(entry)) === true);
+  check('which then carries the mark', link.anchor.hasClass('backtrack-flash'));
 })();
 
 (function () {
@@ -886,9 +896,155 @@ function pressAt(p, x, y) {
   p.settle();
   check('jumping to a footnote is remembered', p.stack.length === 1);
   check('as a move inside the note', p.stack[0].kind === 'within');
+  const entry = p.stack[0];
   p.goBack();
   eq('and takes you back to the sentence you were reading', app.view.applied, { scroll: 120 });
+  p.flash(p.findLink(entry));
   check('with the reference lit so you can find your line', a.hasClass('backtrack-flash'));
+})();
+
+/* ---------------- a pinned note will not be navigated ---------------- */
+
+(function () {
+  const L = { id: 'pinned' };
+  const elsewhere = { id: 'elsewhere' };
+  const pane = { kind: 'pane', path: 'Daily.md', leaf: L };
+  check(
+    'a move out of a pane is offered from anywhere but that pane',
+    usableHere(pane, { path: 'x.md', leaf: elsewhere, leaves: [L, elsewhere] }) === true
+  );
+  check(
+    'and not once you are back in it',
+    usableHere(pane, { path: 'Daily.md', leaf: L, leaves: [L, elsewhere] }) === false
+  );
+  check(
+    'nor once that pane has been closed',
+    usableHere(pane, { path: 'x.md', leaf: elsewhere, leaves: [elsewhere] }) === false
+  );
+})();
+
+(function () {
+  const { app, p } = boot('Daily.md', { scroll: 300 });
+  const pinned = app.view.leaf;
+  const other = { id: 'opened-for-us', history: { backHistory: [], forwardHistory: [] } };
+  app.leaves = [pinned, other];
+  const link = makeLink('internal-link', '議事録');
+  clickThen(p, link.inner);
+  /* Obsidian refuses to navigate a pinned tab and puts us in another pane. */
+  app.view = {
+    file: { path: '議事録.md' },
+    leaf: other,
+    contentEl: app.view.contentEl,
+    state: { scroll: 0 },
+    getEphemeralState() { return this.state; },
+    setEphemeralState(s) { this.applied = s; },
+  };
+  p.settle();
+  check('a click out of a pinned note is remembered', p.stack.length === 1);
+  check('as a move between panes', p.stack[0].kind === 'pane');
+  check('and the button appears, which it did not before', p.button.hasClass('is-visible'));
+  p.goBack();
+  check('pressing it goes back to the pane we clicked in', app.activated === pinned);
+  check('revealing it first, in case it was tucked away', app.revealed === pinned);
+})();
+
+(function () {
+  const { app, p } = boot('Daily.md', { scroll: 300 });
+  const other = { id: 'new-tab', history: { backHistory: [], forwardHistory: [] } };
+  app.leaves = [app.view.leaf, other];
+  const link = makeLink('internal-link', 'Other');
+  p.onLinkClick({ target: link.inner, metaKey: true });
+  if (p.settleTimer) { clearTimeout(p.settleTimer); p.settleTimer = 0; }
+  app.view = {
+    file: { path: 'b.md' },
+    leaf: other,
+    contentEl: app.view.contentEl,
+    state: { scroll: 0 },
+    getEphemeralState() { return this.state; },
+    setEphemeralState(s) { this.applied = s; },
+  };
+  p.settle();
+  check(
+    'but asking for a new tab yourself is not a move to undo',
+    p.stack.length === 0
+  );
+})();
+
+/* ---------------- finding the link again after a redraw ---------------- */
+
+(function () {
+  const { app, p } = boot('long.md', { scroll: 10 });
+  const link = makeLink('internal-link', '#Heading');
+  link.inner.setText('第 3 章 結論');
+  clickThen(p, link.inner);
+  app.view.state = { scroll: 9000 };
+  p.settle();
+  check('what the link said is kept with the move', p.stack[0].linkText === '第 3 章 結論');
+
+  /* Reading view took the paragraph out while we were away and built a new
+   * one on the way back. The element we held is an orphan. */
+  link.anchor.detach();
+  const rebuilt = app.view.contentEl.make('span', { cls: 'internal-link' });
+  rebuilt.make('span', { cls: 'cm-underline', text: '第 3 章 結論' });
+  const found = p.findLink(p.stack[0]);
+  check('so the new one is found by what it says', found === rebuilt);
+  check('and it is the one that gets lit', p.flash(found) === true);
+  check('the new element carries the mark', rebuilt.hasClass('backtrack-flash'));
+})();
+
+(function () {
+  const { app, p } = boot('long.md', { scroll: 10 });
+  const link = makeLink('internal-link', '#Heading');
+  clickThen(p, link.inner);
+  app.view.state = { scroll: 9000 };
+  p.settle();
+  check('the element we held is preferred while it is still there', p.findLink(p.stack[0]) === link.anchor);
+  const orphan = { kind: 'within', path: 'long.md', leaf: app.view.leaf, linkText: 'nothing like this' };
+  check('and a link that no longer exists anywhere is not invented', p.findLink(orphan) === null);
+})();
+
+/* ---------------- looking for the link, not waiting a fixed time ------- */
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  const link = makeLink('internal-link', '#Heading');
+  link.inner.setText('結論へ');
+  clickThen(p, link.inner);
+  app.view.state = { scroll: 500 };
+  p.settle();
+  const entry = p.stack[0];
+
+  /* Mid-flight: Obsidian has not finished opening the note we are going back
+   * to, so the note on screen is still the wrong one. */
+  const elsewhere = {
+    file: { path: 'still-loading.md' },
+    leaf: app.view.leaf,
+    contentEl: new El('div'),
+    state: {},
+    getEphemeralState() { return this.state; },
+  };
+  const real = app.view;
+  app.view = elsewhere;
+  check('a link is not looked for in a note we have not arrived at', p.findLink(entry) === null);
+  check('and nothing is lit by mistake', p.flash(p.findLink(entry)) === false);
+
+  app.view = real;
+  check('once we have arrived it is found', p.findLink(entry) === link.anchor);
+})();
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  const link = makeLink('internal-link', '#Heading');
+  clickThen(p, link.inner);
+  app.view.state = { scroll: 500 };
+  p.settle();
+  const entry = p.stack[0];
+  link.anchor.detach();
+  const id = p.flashLater(entry, 3);
+  check('looking is scheduled rather than done at once', id !== 0);
+  check('and it keeps its own count of how many looks are left', p.flashTimer === id);
+  p.onunload();
+  check('unloading stops it looking', p.flashTimer === 0);
 })();
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');

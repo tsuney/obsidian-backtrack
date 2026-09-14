@@ -90,15 +90,41 @@
  * keeps the colour the theme gave it, and the accent is carried by the shape,
  * which is the one place it is safe at any size. It fades of its own accord,
  * because a mark that stays becomes part of the note.
+ *
+ * The ring starts wide and closes in. A mark that merely appears and fades can
+ * be missed by an eye that is still travelling; one that moves is caught.
  */
 .backtrack-flash {
   border-radius: 4px;
-  box-shadow: 0 0 0 2px var(--interactive-accent);
-  animation: backtrack-fade 1.4s ease-out forwards;
+  animation: backtrack-land 10s ease-out forwards;
 }
 
-@keyframes backtrack-fade {
-  0% { box-shadow: 0 0 0 3px var(--interactive-accent); }
-  70% { box-shadow: 0 0 0 2px var(--interactive-accent); }
-  100% { box-shadow: 0 0 0 0 transparent; }
+/*
+ * Loud on arrival, quiet while you read. The filled accent is there for the
+ * first second, when the eye is still travelling; after that it is a thin
+ * ring that fades, so ten seconds of it never becomes part of the note.
+ */
+@keyframes backtrack-land {
+  0% {
+    box-shadow: 0 0 0 6px var(--interactive-accent);
+    background-color: var(--interactive-accent);
+    color: var(--text-on-accent);
+  }
+  4% {
+    box-shadow: 0 0 0 3px var(--interactive-accent);
+    background-color: var(--interactive-accent);
+    color: var(--text-on-accent);
+  }
+  10% {
+    box-shadow: 0 0 0 2px var(--interactive-accent);
+    background-color: transparent;
+  }
+  85% {
+    box-shadow: 0 0 0 2px var(--interactive-accent);
+    background-color: transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    background-color: transparent;
+  }
 }

@@ -47,9 +47,20 @@ const VERIFY_MS = 300;
 
 const LONG_PRESS_MS = 450;
 
-/* How long the link you came from stays lit after you land back on it. Long
- * enough to find with the eye, short enough not to become part of the page. */
-const FLASH_MS = 1400;
+/* Looking for the link to light: how often, and for how long at most.
+ * Going back to another note means opening and drawing it, and how long that
+ * takes is not ours to know, so it is watched for rather than waited out. */
+const LOOK_EVERY_MS = 80;
+const LOOK_ATTEMPTS = 20;
+
+/* How long the link you came from stays lit after you land back on it.
+ *
+ * Ten seconds, which is long for a mark on a page - but the reader arrives
+ * with their eye still travelling, and a mark that has gone by the time they
+ * look was never there for them. It does not sit still for ten seconds: it
+ * arrives filled, settles to a thin ring within the first second, and fades
+ * from there, so what remains is a marker rather than a highlight. */
+const FLASH_MS = 10000;
 
 /* How far a finger may wander before it is a drag rather than a press. */
 const DRAG_SLOP = 6;
@@ -149,6 +160,16 @@ function pushEntry(stack, entry, max) {
  * are always usable. */
 function usableHere(entry, here) {
   if (!entry || !here) return false;
+  /* A move to another pane is undone by going back to the pane it came from,
+   * so it is offered everywhere except there, and only while that pane is
+   * still open. This is the pinned-note case: the reader clicked an ordinary
+   * link, and Obsidian, refusing to navigate a pinned tab, put them in a
+   * different pane. Nothing scrolled, but their attention moved, and moving
+   * it back is exactly what they will want. */
+  if (entry.kind === 'pane') {
+    if (entry.leaf === here.leaf) return false;
+    return !!(here.leaves && here.leaves.indexOf(entry.leaf) !== -1);
+  }
   /* The move belongs to the pane it was made in. Close that pane, or step
    * into another one, and the move has nothing left to act on: Obsidian's
    * own history went with the pane, and a note restored into a different
@@ -234,6 +255,10 @@ function peekUsable(stack, here) {
 function describeEntry(entry) {
   if (!entry) return '';
   if (entry.kind === 'across') return 'the note you came from';
+  if (entry.kind === 'pane') {
+    const from = String(entry.path || '').split('/').pop().replace(/\.md$/, '');
+    return from ? 'the pane you clicked in (' + from + ')' : 'the pane you clicked in';
+  }
   const name = String(entry.path || '').split('/').pop().replace(/\.md$/, '');
   return name ? 'where you were in ' + name : 'where you were';
 }
@@ -248,6 +273,7 @@ class BacktrackPlugin extends Plugin {
     this.pressTimer = 0;
     this.button = null;
     this.press = null;
+    this.flashTimer = 0;
     this.suppressClick = false;
     this.at = null;
 
@@ -304,8 +330,10 @@ class BacktrackPlugin extends Plugin {
   teardown() {
     if (this.settleTimer) window.clearTimeout(this.settleTimer);
     if (this.pressTimer) window.clearTimeout(this.pressTimer);
+    if (this.flashTimer) window.clearTimeout(this.flashTimer);
     this.settleTimer = 0;
     this.pressTimer = 0;
+    this.flashTimer = 0;
     if (this.button) {
       this.button.remove();
       this.button = null;
@@ -350,12 +378,21 @@ class BacktrackPlugin extends Plugin {
     this.pending = {
       path: view.file.path,
       leaf: view.leaf,
+      /* A modifier means the reader asked for another pane and means to keep
+       * both open, so landing in one is not a move to undo. Without one,
+       * landing in another pane was Obsidian's doing, not theirs. */
+      deliberate: !!(evt.metaKey || evt.ctrlKey || evt.shiftKey || evt.altKey || evt.button === 1),
       state: this.readState(view),
       href: href,
-      /* The link itself, so that coming back can point at it. Held only as
-       * long as the move is: the stack is capped and entries are dropped, so
-       * nothing accumulates. */
+      /* The link itself, and enough about it to find it again.
+       *
+       * Reading view does not keep the whole note in the document: scroll far
+       * enough away and the paragraph is taken out and built afresh when you
+       * return. The element we held is then an orphan - which is exactly the
+       * case this feature exists for, a jump far down a long note. So what it
+       * said is kept too, and used to find the new element. */
       el: anchor,
+      linkText: (anchor.textContent || '').trim().slice(0, 200),
     };
 
     if (this.settleTimer) window.clearTimeout(this.settleTimer);
@@ -386,28 +423,49 @@ class BacktrackPlugin extends Plugin {
     const now = view.file.path;
     const moved = didMove(pending.state, this.readState(view), pending.href);
     const kind = classify(pending.path, now, moved);
-    if (!kind) return;
 
-    if (kind === 'across' && !this.canHandBack()) return;
-
-    /* A move made in one pane and landed in another was opened in a new tab.
-     * The pane it came from is still sitting there untouched, so there is
-     * nothing to undo. */
-    if (view.leaf !== pending.leaf) return;
-
-    const entry =
-      kind === 'across'
-        ? { kind: 'across', path: pending.path, leaf: pending.leaf, el: pending.el }
-        : {
-            kind: 'within',
-            path: pending.path,
-            leaf: pending.leaf,
-            state: pending.state,
-            el: pending.el,
-          };
+    const entry = this.entryFor(pending, view, kind);
+    if (!entry) return;
 
     this.stack = pushEntry(this.stack, entry, MAX_ENTRIES);
     this.render();
+  }
+
+  /* What to remember, if anything, given where the click started and where
+   * it ended up. */
+  entryFor(pending, view, kind) {
+    if (view.leaf !== pending.leaf) {
+      /* Asked for: they opened it elsewhere on purpose and both stay open. */
+      if (pending.deliberate) return null;
+      /* Not asked for: a pinned tab will not be navigated, so Obsidian put
+       * them in another pane. */
+      return {
+        kind: 'pane',
+        path: pending.path,
+        leaf: pending.leaf,
+        state: pending.state,
+        el: pending.el,
+        linkText: pending.linkText,
+      };
+    }
+    if (!kind) return null;
+    if (kind === 'across' && !this.canHandBack()) return null;
+    return kind === 'across'
+      ? {
+          kind: 'across',
+          path: pending.path,
+          leaf: pending.leaf,
+          el: pending.el,
+          linkText: pending.linkText,
+        }
+      : {
+          kind: 'within',
+          path: pending.path,
+          leaf: pending.leaf,
+          state: pending.state,
+          el: pending.el,
+          linkText: pending.linkText,
+        };
   }
 
   /* --- going back -------------------------------------------------- */
@@ -422,10 +480,16 @@ class BacktrackPlugin extends Plugin {
       return false;
     }
 
+    if (picked.entry.kind === 'pane') {
+      this.goToPane(picked.entry);
+      this.render();
+      return true;
+    }
+
     if (picked.entry.kind === 'across') {
       this.handBack();
       /* The note has to be drawn again before its links exist to be lit. */
-      window.setTimeout(() => this.flash(picked.entry.el), SETTLE_MS);
+      this.flashLater(picked.entry);
       this.render();
       return true;
     }
@@ -435,8 +499,28 @@ class BacktrackPlugin extends Plugin {
     } catch (e) {
       new Notice('Backtrack could not restore that position.');
     }
-    this.flash(picked.entry.el);
+    this.flashLater(picked.entry);
     this.render();
+    return true;
+  }
+
+  /* Put the reader back in the pane they clicked in.
+   *
+   * Only the pane changes: it was never scrolled, so there is no position to
+   * restore. Both calls are public API, and revealLeaf comes first in case
+   * the pane is in a sidebar that has since been collapsed. */
+  goToPane(entry) {
+    const workspace = this.app.workspace;
+    try {
+      if (typeof workspace.revealLeaf === 'function') workspace.revealLeaf(entry.leaf);
+      if (typeof workspace.setActiveLeaf === 'function') {
+        workspace.setActiveLeaf(entry.leaf, { focus: true });
+      }
+    } catch (e) {
+      new Notice('Backtrack could not get back to that pane.');
+      return false;
+    }
+    this.flashLater(entry);
     return true;
   }
 
@@ -469,6 +553,49 @@ class BacktrackPlugin extends Plugin {
    * Only if it is still there: a note redrawn since the jump has new elements
    * and the one we kept is an orphan. Lighting an orphan changes nothing the
    * reader can see, so it is skipped rather than guessed at. */
+  /* Find the link again, now that the note has been drawn.
+   *
+   * The element we kept if it is still in the document, and otherwise the
+   * first link on screen that says the same thing and points the same way.
+   * Matching on what it said rather than on where it was: a rebuilt note has
+   * new elements everywhere, but the words are the words. */
+  findLink(entry) {
+    if (!entry) return null;
+    const view = this.activeView();
+    /* Only in the note the link is in. A note still being opened is the wrong
+     * note, and two notes can easily hold links that read the same. */
+    if (!view || !view.file || view.file.path !== entry.path) return null;
+    if (entry.el && entry.el.isConnected !== false) return entry.el;
+    const host = view.contentEl;
+    if (!host || typeof host.querySelectorAll !== 'function') return null;
+    const want = String(entry.linkText || '').trim();
+    if (!want) return null;
+    const all = host.querySelectorAll(LINK_SELECTOR);
+    for (let i = 0; i < all.length; i++) {
+      const el = all[i];
+      if ((el.textContent || '').trim() === want) return el;
+    }
+    return null;
+  }
+
+  /* Light it once the note has had time to be drawn. Lighting it in the same
+   * breath as restoring the position lights whatever was on screen before the
+   * move, which is not what the reader is looking for. */
+  flashLater(entry, attemptsLeft) {
+    if (this.flashTimer) window.clearTimeout(this.flashTimer);
+    const left = attemptsLeft === undefined ? LOOK_ATTEMPTS : attemptsLeft;
+    this.flashTimer = window.setTimeout(() => {
+      this.flashTimer = 0;
+      if (this.flash(this.findLink(entry))) return;
+      /* Not there yet. Going back between notes has to open and draw the note
+       * first, and how long that takes is not a number we get to pick. Give
+       * up eventually rather than watch for ever: a link that never appears
+       * was in a part of the note the reader has since changed. */
+      if (left > 1) this.flashLater(entry, left - 1);
+    }, LOOK_EVERY_MS);
+    return this.flashTimer;
+  }
+
   flash(el) {
     if (!el || el.isConnected === false || typeof el.addClass !== 'function') return false;
     el.addClass('backtrack-flash');
@@ -674,12 +801,26 @@ class BacktrackPlugin extends Plugin {
    * whether Obsidian itself still has anywhere to go back to. */
   here() {
     const view = this.activeView();
-    if (!view || !view.file) return { path: null, leaf: null, canGoBack: false };
+    if (!view || !view.file) {
+      return { path: null, leaf: null, canGoBack: false, leaves: this.openLeaves() };
+    }
     return {
       path: view.file.path,
       leaf: view.leaf,
       canGoBack: this.canGoBackIn(view.leaf),
+      leaves: this.openLeaves(),
     };
+  }
+
+  /* Every pane currently open. A remembered pane that is no longer among
+   * them was closed, and there is nowhere to go back to. */
+  openLeaves() {
+    const out = [];
+    const workspace = this.app.workspace;
+    if (workspace && typeof workspace.iterateAllLeaves === 'function') {
+      workspace.iterateAllLeaves((leaf) => out.push(leaf));
+    }
+    return out;
   }
 
   /* Has Obsidian got a step left in this pane?
