@@ -36,6 +36,8 @@ const {
   clampSpot,
   isDrag,
   spotKey,
+  fallbackKey,
+  readSpotValue,
   GAP,
   describeEntry,
   MAX_ENTRIES,
@@ -206,6 +208,8 @@ function makeLink(cls, href) {
 
 /* ---------------- the plugin ---------------- */
 
+const appStores = {};
+
 function makeApp(path, state) {
   const file = { path: path };
   const pane = new El('div');
@@ -254,7 +258,13 @@ function makeApp(path, state) {
         return true;
       },
     },
-    vault: { adapter: {} },
+    vault: { adapter: {}, getName: () => 'Vault A' },
+    /* The app's store outlives a plugin and is kept per vault, so the stub
+     * keeps it outside the app object too. A store that died with each fake
+     * app could not show that a position is remembered at all. */
+    get store() { return appStores[this.vault.getName()] || (appStores[this.vault.getName()] = {}); },
+    loadLocalStorage(k) { const v = this.store[k]; return v === undefined ? null : v; },
+    saveLocalStorage(k, v) { this.store[k] = v; },
   };
   return app;
 }
@@ -578,8 +588,9 @@ function pressAt(p, x, y) {
   const at = p.at;
   check('the button is placed as soon as it exists', !!at);
   check('beside the column', at.left >= app.view.column.getBoundingClientRect().right);
-  check('and it is told where to stand in absolute terms', p.button.props.left === at.left + 'px');
-  check('with the corner anchoring let go of', p.button.props.bottom === 'auto');
+  check('and it is told where to stand in absolute terms', p.button.props['--backtrack-left'] === at.left + 'px');
+  check('as values, not as styling', p.button.props.left === undefined);
+  check('with the stylesheet told it has been placed', p.button.hasClass('is-placed'));
 })();
 
 (function () {
@@ -625,10 +636,12 @@ function pressAt(p, x, y) {
   reset.callback();
   check('and it goes back beside the column', p.at.left > dragged);
   window.localStorage.clear();
+  for (const k of Object.keys(appStores)) delete appStores[k];
 })();
 
 (function () {
   window.localStorage.clear();
+  for (const k of Object.keys(appStores)) delete appStores[k];
   const { app, p } = boot('a.md', { scroll: 10 });
   const start = p.at;
   pressAt(p, start.left + 22, start.top + 22);
@@ -646,6 +659,7 @@ function pressAt(p, x, y) {
   const back = boot('a.md', { scroll: 10 });
   check('and the desktop keeps its own', back.p.at.left === onDesktop);
   window.localStorage.clear();
+  for (const k of Object.keys(appStores)) delete appStores[k];
 })();
 
 (function () {
@@ -660,6 +674,7 @@ function pressAt(p, x, y) {
   p.button.fire('pointerup', { clientX: start.left + 222, clientY: start.top + 22 });
   check('and a drag never becomes a hold', Notice.all.length === before);
   window.localStorage.clear();
+  for (const k of Object.keys(appStores)) delete appStores[k];
 })();
 
 (function () {
@@ -758,6 +773,7 @@ function pressAt(p, x, y) {
   );
   check('it falls back to the pane, which does have a box', p.at.left + 44 <= pane.right);
   window.localStorage.clear();
+  for (const k of Object.keys(appStores)) delete appStores[k];
 })();
 
 (function () {
@@ -774,6 +790,7 @@ function pressAt(p, x, y) {
   check('and it is measured when it is about to be seen', !!p.at);
   check('landing beside the column, not at the window edge', p.at.left > 300);
   window.localStorage.clear();
+  for (const k of Object.keys(appStores)) delete appStores[k];
 })();
 
 /* ---------------- asking before offering ---------------- */
@@ -1095,6 +1112,106 @@ function pressAt(p, x, y) {
   for (const fn of (p.button.on['pointermove'] || []).slice()) fn(move);
   check('nor does the drag itself', movedStop === 1);
   window.localStorage.clear();
+  for (const k of Object.keys(appStores)) delete appStores[k];
+})();
+
+/* ---------------- a position belongs to one vault ---------------- */
+
+(function () {
+  check('a phone and a desktop keep separate keys', spotKey(true) !== spotKey(false));
+  check('and so do two vaults, where we have to scope it ourselves',
+    fallbackKey('Vault A', false) !== fallbackKey('Vault B', false));
+  check('the vault name is in the key', fallbackKey('Vault A', false).indexOf('Vault A') !== -1);
+  check('a nameless vault still gives a key', typeof fallbackKey(null, false) === 'string');
+
+  eq('a stored object is read back', readSpotValue({ left: 1, top: 2 }), { left: 1, top: 2 });
+  eq('and so is a stored string', readSpotValue('{"left":3,"top":4}'), { left: 3, top: 4 });
+  check('nonsense is refused', readSpotValue('not json') === null);
+  check('a half a position is refused', readSpotValue({ left: 1 }) === null);
+  check('nothing at all is refused', readSpotValue(null) === null);
+})();
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  const start = p.at;
+  pressAt(p, start.left + 22, start.top + 22);
+  p.button.fire('pointermove', { clientX: start.left + 22 - 120, clientY: start.top + 22 });
+  p.button.fire('pointerup', { clientX: start.left + 22 - 120, clientY: start.top + 22 });
+  const moved = p.at.left;
+
+  check("the app's own store is used when it is there", Object.keys(app.store).length === 1);
+  check('and window.localStorage is left alone', window.localStorage.getItem(spotKey(false)) === null);
+
+  /* Another vault, its own store. */
+  const second = makeApp('a.md', { scroll: 10 });
+  second.vault.getName = () => 'Vault B';
+  const q = new BacktrackPlugin(second, { dir: 'plugins/backtrack' });
+  q.onload();
+  check('a second vault does not inherit the first vault position', q.at.left !== moved);
+  window.localStorage.clear();
+  for (const k of Object.keys(appStores)) delete appStores[k];
+})();
+
+(function () {
+  /* An app too old to have the store: we scope by vault ourselves. */
+  const first = makeApp('a.md', { scroll: 10 });
+  delete first.loadLocalStorage;
+  delete first.saveLocalStorage;
+  const p = new BacktrackPlugin(first, { dir: 'plugins/backtrack' });
+  p.onload();
+  const start = p.at;
+  pressAt(p, start.left + 22, start.top + 22);
+  p.button.fire('pointermove', { clientX: start.left + 22 - 130, clientY: start.top + 22 });
+  p.button.fire('pointerup', { clientX: start.left + 22 - 130, clientY: start.top + 22 });
+  const moved = p.at.left;
+  check('the fall-back writes under a key naming the vault',
+    window.localStorage.getItem(fallbackKey('Vault A', false)) !== null);
+
+  const second = makeApp('a.md', { scroll: 10 });
+  delete second.loadLocalStorage;
+  delete second.saveLocalStorage;
+  second.vault.getName = () => 'Vault B';
+  const q = new BacktrackPlugin(second, { dir: 'plugins/backtrack' });
+  q.onload();
+  check('so another vault is unaffected', q.at.left !== moved);
+
+  const again = makeApp('a.md', { scroll: 10 });
+  delete again.loadLocalStorage;
+  delete again.saveLocalStorage;
+  const r = new BacktrackPlugin(again, { dir: 'plugins/backtrack' });
+  r.onload();
+  check('while the same vault finds its own', r.at.left === moved);
+  window.localStorage.clear();
+  for (const k of Object.keys(appStores)) delete appStores[k];
+})();
+
+/* ---------------- reachable by keyboard ---------------- */
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  check('the button is in the tab order', p.button.getAttribute('tabindex') === '0');
+  p.stack = [{ kind: 'within', path: 'a.md', leaf: app.view.leaf, state: { scroll: 7 } }];
+  p.render();
+
+  let prevented = 0;
+  p.button.fire('keydown', { key: 'Enter', preventDefault: () => { prevented++; } });
+  eq('Enter goes back', app.view.applied, { scroll: 7 });
+
+  const second = boot('a.md', { scroll: 10 });
+  second.p.stack = [{ kind: 'within', path: 'a.md', leaf: second.app.view.leaf, state: { scroll: 9 } }];
+  second.p.render();
+  let stopped = 0;
+  second.p.button.fire('keydown', { key: ' ', preventDefault: () => { stopped++; } });
+  eq('Space goes back too', second.app.view.applied, { scroll: 9 });
+  check('and Space does not also scroll the page', stopped === 1);
+
+  const third = boot('a.md', { scroll: 10 });
+  third.p.stack = [{ kind: 'within', path: 'a.md', leaf: third.app.view.leaf, state: { scroll: 5 } }];
+  third.p.render();
+  third.p.button.fire('keydown', { key: 'a', preventDefault: () => {} });
+  check('other keys are left alone', third.app.view.applied === undefined);
+  window.localStorage.clear();
+  for (const k of Object.keys(appStores)) delete appStores[k];
 })();
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');

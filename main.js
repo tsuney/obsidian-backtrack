@@ -237,6 +237,32 @@ function spotKey(isMobile) {
   return 'backtrack/spot/' + (isMobile ? 'mobile' : 'desktop');
 }
 
+/* The same, for the fall-back store.
+ *
+ * Obsidian's desktop runs every vault on one origin, so window.localStorage
+ * is shared between them: a key without the vault's name in it is one answer
+ * for a question each vault asks separately. The app's own store scopes by
+ * vault already, so this shape is only needed where that store is missing. */
+function fallbackKey(vaultName, isMobile) {
+  return 'backtrack/' + String(vaultName || 'vault') + '/spot/' + (isMobile ? 'mobile' : 'desktop');
+}
+
+/* The app's store hands back whatever was put in; an older one, or the
+ * fall-back, hands back a string. Accept either, and refuse anything that is
+ * not a pair of numbers. */
+function readSpotValue(raw) {
+  let spot = raw;
+  if (typeof raw === 'string') {
+    try {
+      spot = JSON.parse(raw);
+    } catch (e) {
+      return null;
+    }
+  }
+  if (!spot || typeof spot.left !== 'number' || typeof spot.top !== 'number') return null;
+  return { left: spot.left, top: spot.top };
+}
+
 /* The topmost usable entry, without disturbing anything.
  *
  * render() needs this and must not consume: a reader who wanders off by hand
@@ -606,6 +632,10 @@ class BacktrackPlugin extends Plugin {
     const el = host.createDiv({ cls: 'backtrack-fab' });
     el.setAttribute('role', 'button');
     el.setAttribute('aria-label', 'Undo the last move');
+    /* Calling a thing a button and leaving it out of the tab order says one
+     * thing to the eye and another to the keyboard. Either it can be reached
+     * or it should not claim to be a button. */
+    el.setAttribute('tabindex', '0');
     setIcon(el, 'undo-2');
 
     /* One gesture, read three ways: a press goes back, a press held says
@@ -620,6 +650,12 @@ class BacktrackPlugin extends Plugin {
         this.suppressClick = false;
         return;
       }
+      this.goBack();
+    });
+    el.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+      /* Space scrolls the page unless we take it. */
+      if (typeof e.preventDefault === 'function') e.preventDefault();
       this.goBack();
     });
     el.addEventListener('contextmenu', (e) => {
@@ -669,29 +705,57 @@ class BacktrackPlugin extends Plugin {
     return box && box.width ? box.width : 44;
   }
 
+  onMobile() {
+    return !!(Platform && Platform.isMobile);
+  }
+
+  /* Where a remembered position is kept.
+   *
+   * The app's own store is preferred because it is already scoped to the
+   * vault. Falling back to window.localStorage means scoping it ourselves:
+   * on the desktop every vault shares one origin, so an unqualified key
+   * would let one vault answer another vault's question. */
+  vaultName() {
+    const vault = this.app && this.app.vault;
+    return vault && typeof vault.getName === 'function' ? vault.getName() : '';
+  }
+
   readSpot() {
+    const app = this.app;
     try {
-      const raw = window.localStorage.getItem(spotKey(!!(Platform && Platform.isMobile)));
-      if (!raw) return null;
-      const spot = JSON.parse(raw);
-      if (!spot || typeof spot.left !== 'number' || typeof spot.top !== 'number') return null;
-      return spot;
+      if (app && typeof app.loadLocalStorage === 'function') {
+        return readSpotValue(app.loadLocalStorage(spotKey(this.onMobile())));
+      }
+      return readSpotValue(window.localStorage.getItem(fallbackKey(this.vaultName(), this.onMobile())));
     } catch (e) {
       return null;
     }
   }
 
   saveSpot(spot) {
+    const app = this.app;
     try {
-      window.localStorage.setItem(spotKey(!!(Platform && Platform.isMobile)), JSON.stringify(spot));
+      if (app && typeof app.saveLocalStorage === 'function') {
+        app.saveLocalStorage(spotKey(this.onMobile()), spot);
+        return;
+      }
+      window.localStorage.setItem(
+        fallbackKey(this.vaultName(), this.onMobile()),
+        JSON.stringify(spot)
+      );
     } catch (e) {
       /* A position we cannot remember is not worth a message. */
     }
   }
 
   forgetSpot() {
+    const app = this.app;
     try {
-      window.localStorage.removeItem(spotKey(!!(Platform && Platform.isMobile)));
+      if (app && typeof app.saveLocalStorage === 'function') {
+        app.saveLocalStorage(spotKey(this.onMobile()), null);
+        return;
+      }
+      window.localStorage.removeItem(fallbackKey(this.vaultName(), this.onMobile()));
     } catch (e) {
       /* nothing to undo */
     }
@@ -706,11 +770,12 @@ class BacktrackPlugin extends Plugin {
     const size = this.size();
     const wanted = spot || this.readSpot() || defaultSpot(seen.col, seen.pane, size);
     const at = clampSpot(wanted, seen.pane, size);
-    const style = this.button.style;
-    style.setProperty('left', at.left + 'px');
-    style.setProperty('top', at.top + 'px');
-    style.setProperty('right', 'auto');
-    style.setProperty('bottom', 'auto');
+    /* Values, not styling. Where the button stands has to be worked out at
+     * run time, but how it stands is the stylesheet's business - and a theme
+     * can reach a custom property, while it cannot reach an inline rule. */
+    this.button.style.setProperty('--backtrack-left', at.left + 'px');
+    this.button.style.setProperty('--backtrack-top', at.top + 'px');
+    this.button.addClass('is-placed');
     this.at = at;
     return at;
   }
@@ -867,6 +932,8 @@ module.exports.defaultSpot = defaultSpot;
 module.exports.clampSpot = clampSpot;
 module.exports.isDrag = isDrag;
 module.exports.spotKey = spotKey;
+module.exports.fallbackKey = fallbackKey;
+module.exports.readSpotValue = readSpotValue;
 module.exports.GAP = GAP;
 module.exports.DRAG_SLOP = DRAG_SLOP;
 module.exports.describeEntry = describeEntry;

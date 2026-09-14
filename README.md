@@ -2,40 +2,46 @@
 
 One button that undoes your last move.
 
-## The problem
+## Read without opening tabs
 
-Obsidian goes back well between notes. Press the back command and you land where you were reading, part way down the page.
+Reading a note means glancing at other notes and at other parts of the same note. Open each one in a tab and the tabs pile up - and most of them you only ever needed to look at once. What is left is a row of tabs where you have to work out which ones still matter.
 
-It cannot go back *inside* a note. A jump to a heading or a block reference never becomes a history entry, so the back command steps over it and takes you to whatever note you had open before. On a long note read through its own table of contents, that is exactly the move you wanted to undo.
+If you can go and come back in the same tab, you never open them. The tabs you have open are the ones you still have a use for.
 
-On a phone this is worse. There is no hover preview to avoid the jump, and no hotkey to undo it.
+That only works if you can undo every kind of jump. Obsidian can already undo the jump between notes, and it puts you back where you were reading. **It cannot undo a jump inside a note.** A heading link or a block reference never becomes a history entry, so the back command steps over it and takes you to whatever note you had open before. On a long note read through its own table of contents - the case where staying in one tab matters most - going back is exactly what you cannot do.
 
-## What this does
+On a phone it is worse. There is no hover preview to avoid the jump, and no hotkey to undo it.
 
-A small round button appears in the bottom right corner once there is something to undo. Press it and the last move is undone.
+## What it does
+
+A small round button appears once there is something to undo. Press it and the last move is undone.
 
 - **Inside a note** it puts you back where you were reading.
 - **Between notes** it hands the move to Obsidian's own back command, which already does this correctly.
+- **Out of a pinned note**, where Obsidian opens another pane rather than navigating, it takes you back to the pane you clicked in.
+
+Footnotes count as jumps. Obsidian puts a small arrow at the end of each footnote, but that only helps once you are down there and have noticed it.
 
 You never have to remember which kind of jump you made. There is one control and it always means the same thing.
 
-Press and hold the button (or right-click it) to hear where it would take you.
+The link you came from is lit when you land on it, so you do not have to find your line again.
 
-There is also a command, **Backtrack: Undo the last move**, if you would rather bind a key.
+## Using it
 
-## Why one button and not two
+- **Press** it to go back. **Enter** or **Space** work when it has focus.
+- **Press and hold** (or right-click) to hear where it would take you.
+- **Drag** it anywhere. Where you leave it is remembered for that device.
+- Commands: **Undo the last move**, and **Put the button back** to undo a drag.
 
-A control that only handled jumps inside a note would ask you to remember how you arrived. Reading mixes the two freely: note to note, then a heading inside that note, then out to a third note. Two controls for one intention means two answers to one question, and you will pick the wrong one.
+It appears when there is a move to undo and goes when there is not. It is never on a timer: a control that vanishes by itself has to be looked for every time, and a control you have to look for is one you stop trusting.
 
-So the position is restored in one place only. Between notes, Obsidian already keeps it correctly, and a position kept in two places is a position that will disagree with itself.
+At most ten moves are remembered, and only for as long as the app is open. Nothing is written to your vault and nothing is synced.
 
-## When the button appears and disappears
+## Why it reads three private values
 
-It appears when there is a move to undo, and it goes when there is not. It is never on a timer. A control that vanishes by itself has to be looked for every time, and a control you have to look for is one you stop trusting.
+Obsidian's public API cannot answer one question this needs: **does this pane still have a step to go back to?** Without an answer, the button would offer moves it cannot make, and a button that does nothing is worse than no button.
 
-At most ten moves are remembered, and only for as long as the app is open. Nothing is written to disk and nothing is synced.
-
-If you navigate away by hand and a remembered move no longer fits the note on screen, that move is dropped rather than forced on you.
+So three values outside the public API are read: the `app:go-back` command, its availability check, and the pane's own back history. Each is tested for before it is used, and if any is missing the plugin falls back rather than failing. Success is never taken from a return value - it is judged by whether the open file actually changed.
 
 ## Install
 
