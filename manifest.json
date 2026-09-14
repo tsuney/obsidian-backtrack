@@ -1,0 +1,10 @@
+{
+  "id": "backtrack",
+  "name": "Backtrack",
+  "version": "0.1.0",
+  "minAppVersion": "1.6.6",
+  "description": "One button that undoes your last move, including the jump to a heading inside a note that the back command skips over. Works on the phone, where there are no hotkeys.",
+  "author": "Tsuneyama",
+  "authorUrl": "https://github.com/tsuney",
+  "isDesktopOnly": false
+}

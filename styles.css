@@ -1,0 +1,69 @@
+/*
+ * Backtrack
+ *
+ * One floating control. It sits out of the way of everything the app already
+ * puts in the bottom corners, and it is big enough to hit with a thumb.
+ */
+
+.backtrack-fab {
+  position: fixed;
+  right: calc(env(safe-area-inset-right, 0px) + 16px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
+
+  /* 44px is the smallest target a finger can be relied on to hit. */
+  width: 44px;
+  height: 44px;
+
+  display: none;
+  align-items: center;
+  justify-content: center;
+
+  border-radius: 50%;
+  border: 1px solid var(--background-modifier-border);
+  background-color: var(--background-secondary);
+  color: var(--text-muted);
+  box-shadow: var(--shadow-s, 0 2px 8px rgba(0, 0, 0, 0.18));
+
+  cursor: pointer;
+  z-index: var(--layer-notice, 60);
+
+  /* A long press should offer to go back, not to select text or to hand the
+   * page to the browser's own menu. */
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.backtrack-fab.is-visible {
+  display: flex;
+}
+
+.backtrack-fab:hover {
+  color: var(--text-normal);
+  background-color: var(--background-modifier-hover);
+}
+
+.backtrack-fab:active {
+  transform: scale(0.94);
+}
+
+.backtrack-fab .svg-icon {
+  width: 20px;
+  height: 20px;
+}
+
+/*
+ * On a phone the bottom edge belongs to the app: the navigation bar sits
+ * there, and the editing toolbar rises above the keyboard. Clear both rather
+ * than land on top of them.
+ */
+.is-mobile .backtrack-fab {
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 72px);
+  width: 48px;
+  height: 48px;
+}
+
+.is-mobile.is-keyboard-shown .backtrack-fab {
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 96px);
+}
