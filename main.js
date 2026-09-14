@@ -133,6 +133,20 @@ function nextUsable(stack, currentPath) {
   return { entry: null, rest: rest };
 }
 
+/* The topmost usable entry, without disturbing anything.
+ *
+ * render() needs this and must not consume: a reader who wanders off by hand
+ * and comes back should find the button where they left it, not find that
+ * looking at the screen threw their place away. */
+function peekUsable(stack, currentPath) {
+  for (let i = stack.length - 1; i >= 0; i--) {
+    const entry = stack[i];
+    if (entry.kind === 'across') return entry;
+    if (entry.path === currentPath) return entry;
+  }
+  return null;
+}
+
 /* What to call the place a button press would take you. */
 function describeEntry(entry) {
   if (!entry) return '';
@@ -171,8 +185,16 @@ class BacktrackPlugin extends Plugin {
       },
     });
 
+    /* The button's answer depends on which note is on screen, so it has to be
+     * asked again whenever that changes. A judgement nobody re-runs keeps
+     * showing yesterday's conclusion. */
+    const again = () => this.render();
+    if (typeof this.app.workspace.on === 'function') {
+      this.registerEvent(this.app.workspace.on('active-leaf-change', again));
+      this.registerEvent(this.app.workspace.on('file-open', again));
+    }
+
     this.app.workspace.onLayoutReady(() => this.ensureButton());
-    this.register(() => this.teardown());
   }
 
   onunload() {
@@ -192,6 +214,21 @@ class BacktrackPlugin extends Plugin {
 
   activeView() {
     return this.app.workspace.getActiveViewOfType(MarkdownView);
+  }
+
+  /* Can Obsidian still take a note-to-note move back?
+   *
+   * The command id is not public API. Leaning on something unpromised means
+   * deciding in advance where to land when it is gone, and the landing here is
+   * to not offer the move at all: a button that does nothing is worse than no
+   * button. So this is asked before an across entry is ever remembered, not
+   * after the reader has pressed. */
+  canHandBack() {
+    const commands = this.app && this.app.commands;
+    if (!commands || typeof commands.executeCommandById !== 'function') return false;
+    const known = commands.commands;
+    if (known && typeof known === 'object') return !!known[GO_BACK_COMMAND];
+    return true;
   }
 
   /* --- remembering ------------------------------------------------ */
@@ -246,6 +283,8 @@ class BacktrackPlugin extends Plugin {
     const kind = classify(pending.path, now, moved);
     if (!kind) return;
 
+    if (kind === 'across' && !this.canHandBack()) return;
+
     const entry =
       kind === 'across'
         ? { kind: 'across', path: pending.path }
@@ -259,8 +298,7 @@ class BacktrackPlugin extends Plugin {
 
   goBack() {
     const view = this.activeView();
-    const currentPath = view && view.file ? view.file.path : null;
-    const picked = nextUsable(this.stack, currentPath);
+    const picked = nextUsable(this.stack, this.currentPath());
     this.stack = picked.rest;
 
     if (!picked.entry) {
@@ -341,16 +379,22 @@ class BacktrackPlugin extends Plugin {
    * trusting. It goes when there is nothing left to undo, and not before. */
   render() {
     if (!this.button) return;
-    const has = this.stack.length > 0;
-    this.button.toggleClass('is-visible', has);
-    const top = this.stack.length ? this.stack[this.stack.length - 1] : null;
-    const label = has ? 'Back to ' + describeEntry(top) : 'Undo the last move';
-    this.button.setAttribute('aria-label', label);
+    const usable = peekUsable(this.stack, this.currentPath());
+    this.button.toggleClass('is-visible', !!usable);
+    this.button.setAttribute(
+      'aria-label',
+      usable ? 'Back to ' + describeEntry(usable) : 'Undo the last move'
+    );
+  }
+
+  currentPath() {
+    const view = this.activeView();
+    return view && view.file ? view.file.path : null;
   }
 
   sayWhere() {
-    const top = this.stack.length ? this.stack[this.stack.length - 1] : null;
-    new Notice(top ? 'Back to ' + describeEntry(top) : 'Nothing to undo');
+    const usable = peekUsable(this.stack, this.currentPath());
+    new Notice(usable ? 'Back to ' + describeEntry(usable) : 'Nothing to undo');
   }
 
   /* --- trace ------------------------------------------------------- */
@@ -391,6 +435,7 @@ module.exports.didMove = didMove;
 module.exports.classify = classify;
 module.exports.pushEntry = pushEntry;
 module.exports.nextUsable = nextUsable;
+module.exports.peekUsable = peekUsable;
 module.exports.describeEntry = describeEntry;
 module.exports.MAX_ENTRIES = MAX_ENTRIES;
 module.exports.LINK_SELECTOR = LINK_SELECTOR;

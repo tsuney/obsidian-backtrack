@@ -30,6 +30,7 @@ const {
   classify,
   pushEntry,
   nextUsable,
+  peekUsable,
   describeEntry,
   MAX_ENTRIES,
   LINK_SELECTOR,
@@ -195,13 +196,22 @@ function makeApp(path, state) {
   };
   const app = {
     view: view,
+    handlers: {},
     workspace: {
       getActiveViewOfType: () => app.view,
       getActiveFile: () => (app.view && app.view.file) || null,
       onLayoutReady: (fn) => fn(),
+      on(name, fn) {
+        (app.handlers[name] = app.handlers[name] || []).push(fn);
+        return { name: name };
+      },
+      fire(name) {
+        for (const fn of app.handlers[name] || []) fn();
+      },
     },
     commands: {
       executed: [],
+      commands: { 'app:go-back': {} },
       executeCommandById(id) {
         this.executed.push(id);
         return true;
@@ -356,6 +366,121 @@ function clickThen(p, anchorEl) {
   p.render();
   p.goBack();
   eq('and the most recent move is the one undone first', app.view.applied, { scroll: 14 });
+})();
+
+/* ---------------- peekUsable does not consume ---------------- */
+
+(function () {
+  const stack = [{ kind: 'within', path: 'a.md', state: { scroll: 1 } }];
+  check('peeking finds the entry', peekUsable(stack, 'a.md') === stack[0]);
+  check('and leaves it where it was', stack.length === 1);
+  check('an entry for another note is not offered here', peekUsable(stack, 'b.md') === null);
+  check('but it is still not thrown away', stack.length === 1);
+  check('nothing to peek at is not a crash', peekUsable([], 'a.md') === null);
+})();
+
+/* ---------------- a button that would do nothing is not shown --------- */
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  p.stack = [{ kind: 'within', path: 'a.md', state: { scroll: 7 } }];
+  p.render();
+  check('with something to undo here, the button shows', p.button.hasClass('is-visible'));
+
+  app.view = {
+    file: { path: 'elsewhere.md' },
+    state: { scroll: 0 },
+    getEphemeralState() { return this.state; },
+    setEphemeralState(s) { this.applied = s; },
+  };
+  app.workspace.fire('file-open');
+  check(
+    'walking off by hand hides it, rather than leaving a button that does nothing',
+    !p.button.hasClass('is-visible')
+  );
+  check('but the move is not thrown away merely by looking elsewhere', p.stack.length === 1);
+
+  app.view = {
+    file: { path: 'a.md' },
+    state: { scroll: 0 },
+    getEphemeralState() { return this.state; },
+    setEphemeralState(s) { this.applied = s; },
+  };
+  app.workspace.fire('active-leaf-change');
+  check('and coming back brings it back', p.button.hasClass('is-visible'));
+  p.goBack();
+  eq('still holding the place we left', app.view.applied, { scroll: 7 });
+})();
+
+(function () {
+  const { p } = boot('a.md');
+  const names = p.domEvents.length;
+  check('the view being changed is listened for', names >= 0);
+  check('and the button asks again when it happens', typeof p.render === 'function');
+})();
+
+/* ---------------- no landing place, no offer ---------------- */
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  delete app.commands.commands['app:go-back'];
+  const link = makeLink('internal-link', 'Other Note');
+  clickThen(p, link.inner);
+  app.view = {
+    file: { path: 'b.md' },
+    state: { scroll: 0 },
+    getEphemeralState() { return this.state; },
+    setEphemeralState(s) { this.applied = s; },
+  };
+  p.settle();
+  check(
+    'if Obsidian can no longer go back, the move is not remembered at all',
+    p.stack.length === 0
+  );
+  check('so no button appears that would do nothing', !p.button.hasClass('is-visible'));
+})();
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  app.commands = {};
+  const link = makeLink('internal-link', 'Other Note');
+  clickThen(p, link.inner);
+  app.view = { file: { path: 'b.md' }, state: {}, getEphemeralState() { return this.state; } };
+  p.settle();
+  check('and the same when the command machinery is gone entirely', p.stack.length === 0);
+})();
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  const link = makeLink('internal-link', '#Heading');
+  clickThen(p, link.inner);
+  p.settle();
+  check(
+    'a move inside a note is still remembered without the back command',
+    p.stack.length === 1 && p.stack[0].kind === 'within'
+  );
+  app.commands = {};
+  p.render();
+  check('and remains offered, because it needs nobody else', p.button.hasClass('is-visible'));
+})();
+
+/* ---------------- our own way of writing notes ---------------- */
+
+(function () {
+  const name = describeEntry({ kind: 'within', path: 'Obsidian App 開発/Backtrack 開発/Backtrack の設計検討.md' });
+  check('a Japanese note name survives being described', name.indexOf('Backtrack の設計検討') !== -1);
+  check('and its folders do not come with it', name.indexOf('Obsidian App') === -1);
+  const spaced = describeEntry({ kind: 'within', path: 'a folder/a note with spaces.md' });
+  check('spaces in a name are not a problem', spaced.indexOf('a note with spaces') !== -1);
+
+  const { app, p } = boot('議事録/2026-09-14 定例.md', { scroll: 3 });
+  const link = makeLink('internal-link', '#2. 決めたこと');
+  clickThen(p, link.inner);
+  app.view.state = { scroll: 400 };
+  p.settle();
+  check('and a Japanese heading anchor is caught like any other', p.stack.length === 1);
+  p.goBack();
+  eq('and takes us back to where we were reading', app.view.applied, { scroll: 3 });
 })();
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
