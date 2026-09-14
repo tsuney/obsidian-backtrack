@@ -1047,5 +1047,55 @@ function pressAt(p, x, y) {
   check('unloading stops it looking', p.flashTimer === 0);
 })();
 
+/* ---------------- release hygiene ---------------- */
+
+(function () {
+  const src = require('fs').readFileSync(require('path').join(__dirname, 'main.js'), 'utf8');
+  check('no diagnostic scaffolding is left in the published file', src.indexOf('trace.log') === -1);
+  check('and no command offers to write one', src.indexOf('write-trace') === -1);
+  check('nothing hijacks the console', src.indexOf('console.error =') === -1);
+  const manifest = JSON.parse(
+    require('fs').readFileSync(require('path').join(__dirname, 'manifest.json'), 'utf8')
+  );
+  check('the manifest says it runs on a phone', manifest.isDesktopOnly === false);
+  check('its description is one short sentence, not a feature list', manifest.description.length <= 160);
+  check('and says it only once', manifest.description.split('.').filter((x) => x.trim()).length === 1);
+  const versions = JSON.parse(
+    require('fs').readFileSync(require('path').join(__dirname, 'versions.json'), 'utf8')
+  );
+  check('versions.json knows this version', !!versions[manifest.version]);
+  check('and agrees about the oldest app it needs', versions[manifest.version] === manifest.minAppVersion);
+})();
+
+/* ---------------- the drag is not the sidebar's gesture ---------------- */
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  p.stack = [{ kind: 'within', path: 'a.md', leaf: app.view.leaf, state: { scroll: 7 } }];
+  p.render();
+  const start = p.at;
+  let stopped = 0;
+  const down = Object.assign(
+    { clientX: start.left + 22, clientY: start.top + 22, pointerId: 1 },
+    { stopPropagation: () => { stopped++; } }
+  );
+  for (const fn of (p.button.on['pointerdown'] || []).slice()) fn(down);
+  check(
+    'a press on the button does not travel on to close a sidebar',
+    stopped === 1
+  );
+  let movedStop = 0;
+  const move = {
+    clientX: start.left + 22 - 200,
+    clientY: start.top + 22,
+    pointerId: 1,
+    preventDefault: () => {},
+    stopPropagation: () => { movedStop++; },
+  };
+  for (const fn of (p.button.on['pointermove'] || []).slice()) fn(move);
+  check('nor does the drag itself', movedStop === 1);
+  window.localStorage.clear();
+})();
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail === 0 ? 0 : 1);

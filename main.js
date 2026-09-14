@@ -93,8 +93,6 @@ const LINK_SELECTOR =
  * returns. */
 const GO_BACK_COMMAND = 'app:go-back';
 
-const TRACE_FILE = 'trace.log';
-
 /* ------------------------------------------------------------------ *
  * Pure helpers. Everything below this line can be tested without an
  * app, a window or a vault, and everything above the plugin class is
@@ -298,13 +296,6 @@ class BacktrackPlugin extends Plugin {
       },
     });
 
-    this.addCommand({
-      id: 'write-trace',
-      name: 'Write a debug trace',
-      callback: () => {
-        this.writeTrace();
-      },
-    });
 
     /* The button's answer depends on which note is on screen, so it has to be
      * asked again whenever that changes. A judgement nobody re-runs keeps
@@ -727,6 +718,13 @@ class BacktrackPlugin extends Plugin {
   /* --- the gesture -------------------------------------------------- */
 
   onPress(e) {
+    /* On a phone a one-finger drag is the gesture that closes a sidebar, and
+     * it is not ours to take. Treeview measured this: the swipe is not
+     * grabbed at the top but travels up from the element, so stopping it here
+     * genuinely works alongside touch-action: none. The escape hatch is that
+     * a tap and the command both still go back, so nothing is lost if a
+     * platform ever behaves differently. */
+    if (typeof e.stopPropagation === 'function') e.stopPropagation();
     const at = this.at || this.place();
     this.press = {
       x: e.clientX,
@@ -751,6 +749,7 @@ class BacktrackPlugin extends Plugin {
     const dy = e.clientY - this.press.y;
     if (!this.press.moved && !isDrag(dx, dy)) return;
     this.press.moved = true;
+    if (typeof e.stopPropagation === 'function') e.stopPropagation();
     if (this.pressTimer) {
       window.clearTimeout(this.pressTimer);
       this.pressTimer = 0;
@@ -851,33 +850,6 @@ class BacktrackPlugin extends Plugin {
     new Notice(usable ? 'Back to ' + describeEntry(usable) : 'Nothing to undo');
   }
 
-  /* --- trace ------------------------------------------------------- */
-
-  /* The shape of ephemeral state is undocumented. Rather than guess from the
-   * console over someone's shoulder, write one sample to a file inside the
-   * plugin folder where it can be read directly. Off unless asked for, and to
-   * be removed before this goes anywhere public. */
-  async writeTrace() {
-    const view = this.activeView();
-    const state = this.readState(view);
-    const line =
-      JSON.stringify({
-        at: new Date().toISOString(),
-        file: view && view.file ? view.file.path : null,
-        mode: view && typeof view.getMode === 'function' ? view.getMode() : null,
-        state: state,
-        stack: this.stack.map((e) => ({ kind: e.kind, path: e.path })),
-      }) + '\n';
-    const path = this.manifest.dir + '/' + TRACE_FILE;
-    try {
-      const adapter = this.app.vault.adapter;
-      if (await adapter.exists(path)) await adapter.append(path, line);
-      else await adapter.write(path, line);
-      new Notice('Backtrack: wrote a trace line.');
-    } catch (e) {
-      new Notice('Backtrack: could not write the trace.');
-    }
-  }
 }
 
 module.exports = BacktrackPlugin;
