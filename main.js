@@ -101,6 +101,10 @@ const LINK_SELECTOR =
  * returns. */
 const GO_BACK_COMMAND = 'app:go-back';
 
+/* The events a press on a link can reach us as. One gesture usually produces
+ * more than one of these, and the first to arrive is the one we trust. */
+const CATCH_EVENTS = ['pointerup', 'touchend', 'click'];
+
 /* ------------------------------------------------------------------ *
  * Pure helpers. Everything below this line can be tested without an
  * app, a window or a vault, and everything above the plugin class is
@@ -344,14 +348,43 @@ class BacktrackPlugin extends Plugin {
     this.at = null;
 
     /* Capture phase on purpose. Obsidian's own handler runs on the way back
-     * up and moves the view; by then the position we want is gone. */
-    this.registerDomEvent(document, 'click', this.onLinkClick.bind(this), { capture: true });
+     * up and moves the view; by then the position we want is gone.
+     *
+     * Three kinds of event, not one. A tap is not obliged to reach us as a
+     * click: a platform may take the touch for itself and never let the click
+     * through, and which one it lets through is not ours to choose. Listening
+     * only for the click means the capture works or fails per platform, for
+     * reasons we cannot see from here. Listening for all three makes it not
+     * depend on the answer.
+     *
+     * Over-catching costs nothing. What is caught is only a candidate: 140ms
+     * later we look at where we actually are, and if nothing moved, nothing
+     * is remembered. The decision was never the event's to make. */
+    const catchLinkEvent = this.onLinkClick.bind(this);
+    CATCH_EVENTS.forEach((type) => {
+      this.registerDomEvent(document, type, catchLinkEvent, { capture: true });
+    });
 
     this.addCommand({
       id: 'go-back',
       name: 'Undo the last move',
       callback: () => {
         this.goBack();
+      },
+    });
+
+    /* The same answer a long press on the button gives, without the button.
+     *
+     * Holding the button says where it would take you. That is fine until the
+     * button is not in front of you - it is off the bottom of a phone, or the
+     * reader is in a mode where there is nothing to undo and so nothing is
+     * drawn. Asking should not require first finding the thing you are asking
+     * about. */
+    this.addCommand({
+      id: 'say-where',
+      name: 'Where would it take me?',
+      callback: () => {
+        this.sayWhere();
       },
     });
 
@@ -423,6 +456,15 @@ class BacktrackPlugin extends Plugin {
   /* --- remembering ------------------------------------------------ */
 
   onLinkClick(evt) {
+    /* The first event of a gesture wins, and the rest are dropped.
+     *
+     * Not merely to avoid doing the work twice. By the time the later ones
+     * arrive the move may already have happened, so the position they would
+     * record is the one we are trying to get back from - the entry would look
+     * perfectly well formed and point at the wrong place. A pending capture
+     * is therefore a closed door until it settles, 140ms later. */
+    if (this.pending) return;
+
     const target = evt && evt.target;
     if (!target || typeof target.closest !== 'function') return;
     const anchor = target.closest(LINK_SELECTOR);
@@ -1058,4 +1100,5 @@ module.exports.visibleHalf = visibleHalf;
 module.exports.KEEP_AT_MS = KEEP_AT_MS;
 module.exports.MAX_ENTRIES = MAX_ENTRIES;
 module.exports.LINK_SELECTOR = LINK_SELECTOR;
+module.exports.CATCH_EVENTS = CATCH_EVENTS;
 module.exports.GO_BACK_COMMAND = GO_BACK_COMMAND;

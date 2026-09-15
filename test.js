@@ -45,6 +45,7 @@ const {
   LINK_SELECTOR,
   GO_BACK_COMMAND,
   KEEP_AT_MS,
+  CATCH_EVENTS,
   BacktrackPlugin,
 } = m;
 
@@ -317,6 +318,90 @@ function clickThen(p, anchorEl) {
     !!capture && !!capture.options && capture.options.capture === true
   );
   check('a command is offered so a keyboard can reach it too', p.commands.some((c) => c.id === 'go-back'));
+  check(
+    'and one that answers where it would go, for when the button is not in front of you',
+    p.commands.some((c) => c.id === 'say-where')
+  );
+})();
+
+/* ---------------- a press is not obliged to be a click ---------------- *
+ *
+ * A phone may take the touch for itself and never let a click through, and
+ * which event a platform lets through is not ours to choose. Listening for
+ * one of them makes the capture work or fail per platform for reasons that
+ * cannot be seen from here. */
+
+(function () {
+  const { app, p } = boot('a.md');
+  const on = {};
+  for (const e of p.domEvents) if (e.el === document) on[e.type] = e.options;
+  check('a press is caught as a click', !!on.click);
+  check('and as a pointerup, in case the click never arrives', !!on.pointerup);
+  check('and as a touchend, in case neither does', !!on.touchend);
+  check(
+    'every one of them on the capture phase',
+    CATCH_EVENTS.every((t) => on[t] && on[t].capture === true)
+  );
+})();
+
+/* Fire through the listener the plugin actually registered, not through the
+ * method by name: the question is whether it is wired to that event at all. */
+function fireOn(p, type, ev) {
+  const row = p.domEvents.filter((e) => e.el === document && e.type === type)[0];
+  if (!row) return false;
+  row.fn(ev);
+  return true;
+}
+
+(function () {
+  const { app, p } = boot('a.md');
+  const link = makeLink('internal-link', 'Other Note', app.view.reading);
+  check('there is a pointerup listener to fire', fireOn(p, 'pointerup', { target: link.inner }));
+  check('a press that only reaches us as a pointerup is caught', !!p.pending);
+  if (p.settleTimer) { clearTimeout(p.settleTimer); p.settleTimer = 0; }
+  app.view.file.path = 'b.md';
+  p.settle();
+  check('and the move it made is remembered', p.stack.length === 1 && p.stack[0].kind === 'across');
+})();
+
+(function () {
+  const { app, p } = boot('a.md');
+  const link = makeLink('internal-link', 'Other Note', app.view.reading);
+  check('there is a touchend listener to fire', fireOn(p, 'touchend', { target: link.inner }));
+  check('a press that only reaches us as a touchend is caught too', !!p.pending);
+  if (p.settleTimer) { clearTimeout(p.settleTimer); p.settleTimer = 0; }
+  app.view.file.path = 'b.md';
+  p.settle();
+  check('and that move is remembered as well', p.stack.length === 1 && p.stack[0].kind === 'across');
+})();
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 120 });
+  const link = makeLink('internal-link', 'Other Note', app.view.reading);
+  fireOn(p, 'pointerup', { target: link.inner });
+  const first = p.pending;
+  check('the press was caught at all', !!first);
+  if (!first) return;
+
+  /* The move happens on the pointerup, and the click arrives after it. An
+   * entry built from that later event would be well formed and point at the
+   * place we are trying to get back from. */
+  app.view.file.path = 'b.md';
+  app.view.state = { scroll: 0 };
+  const later = makeLink('internal-link', 'Third Note', app.view.reading);
+  fireOn(p, 'click', { target: later.inner });
+
+  check('the rest of one gesture is dropped', p.pending === first);
+  check('so the note kept is the one we left', p.pending.path === 'a.md');
+  check(
+    'and the position kept is the one from before the move',
+    positionKey(p.pending.state) === positionKey({ scroll: 120 })
+  );
+
+  if (p.settleTimer) { clearTimeout(p.settleTimer); p.settleTimer = 0; }
+  p.settle();
+  check('one gesture leaves one entry, not three', p.stack.length === 1);
+  check('and it points at where the reader actually was', p.stack[0].path === 'a.md');
 })();
 
 (function () {
