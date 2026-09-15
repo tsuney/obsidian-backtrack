@@ -50,8 +50,16 @@ const LONG_PRESS_MS = 450;
 /* Looking for the link to light: how often, and for how long at most.
  * Going back to another note means opening and drawing it, and how long that
  * takes is not ours to know, so it is watched for rather than waited out. */
-const LOOK_EVERY_MS = 80;
-const LOOK_ATTEMPTS = 20;
+const LOOK_EVERY_MS = 100;
+const LOOK_ATTEMPTS = 40;
+
+/* When to check that the mark is still there, measured from the moment it was
+ * put on. In Live Preview the link is CodeMirror's element, and CodeMirror
+ * rebuilds its decorations after a note is drawn again, discarding any class
+ * that is not its own. A handful of checks over the first couple of seconds
+ * covers the drawing and then stops: a mark defended for ever would flicker,
+ * and would fight the reader the moment they edited the line. */
+const KEEP_AT_MS = [200, 500, 1000, 2000];
 
 /* How long the link you came from stays lit after you land back on it.
  *
@@ -275,6 +283,39 @@ function peekUsable(stack, here) {
   return null;
 }
 
+/* Two pieces of link text are the same if they read the same. Rendering can
+ * add or lose whitespace around and inside a link between one drawing of a
+ * note and the next, and a comparison that fails on a doubled space would
+ * quietly find nothing. */
+function sameWords(text) {
+  return String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+}
+
+/* The half of the view the reader is actually looking at.
+ *
+ * A markdown view holds both halves at once: the reading view and the editor.
+ * The one not in use is hidden, not thrown away, so searching the whole view
+ * finds two of every link - and the first of the two is in the half nobody
+ * can see. Lighting that one does exactly what going back between notes
+ * looked like from the reader's chair: nothing at all. Worse, it looks like
+ * success from in here, because the class really was added.
+ *
+ * Measured rather than reasoned about: the log showed a mark landing on a
+ * cm-hmd-internal-link inside markdown-source-view while the note was on
+ * screen in reading mode, and CodeMirror stripping the unknown class again
+ * within 300ms. */
+function visibleHalf(view) {
+  const host = view && view.contentEl;
+  if (!host || typeof host.querySelector !== 'function') return host || null;
+  const mode = typeof view.getMode === 'function' ? view.getMode() : null;
+  const want =
+    mode === 'source' ? '.markdown-source-view' : mode === 'preview' ? '.markdown-reading-view' : null;
+  /* An older layout that has no such half, or a mode we do not know, is
+   * better served by the whole view than by nothing. */
+  if (!want) return host;
+  return host.querySelector(want) || host;
+}
+
 /* What to call the place a button press would take you. */
 function describeEntry(entry) {
   if (!entry) return '';
@@ -298,6 +339,7 @@ class BacktrackPlugin extends Plugin {
     this.button = null;
     this.press = null;
     this.flashTimer = 0;
+    this.keepTimer = 0;
     this.suppressClick = false;
     this.at = null;
 
@@ -348,9 +390,11 @@ class BacktrackPlugin extends Plugin {
     if (this.settleTimer) window.clearTimeout(this.settleTimer);
     if (this.pressTimer) window.clearTimeout(this.pressTimer);
     if (this.flashTimer) window.clearTimeout(this.flashTimer);
+    if (this.keepTimer) window.clearTimeout(this.keepTimer);
     this.settleTimer = 0;
     this.pressTimer = 0;
     this.flashTimer = 0;
+    this.keepTimer = 0;
     if (this.button) {
       this.button.remove();
       this.button = null;
@@ -582,17 +626,44 @@ class BacktrackPlugin extends Plugin {
     /* Only in the note the link is in. A note still being opened is the wrong
      * note, and two notes can easily hold links that read the same. */
     if (!view || !view.file || view.file.path !== entry.path) return null;
-    if (entry.el && entry.el.isConnected !== false) return entry.el;
-    const host = view.contentEl;
-    if (!host || typeof host.querySelectorAll !== 'function') return null;
-    const want = String(entry.linkText || '').trim();
+    /* Only the half on screen. The other half holds a second copy of every
+     * link in the note, and a mark put there is invisible. */
+    const host = visibleHalf(view);
+    if (!host) return null;
+
+    /* The element we kept, but only if it is in the half now on screen.
+     *
+     * "Still in the document" is not the same question as "still in front of
+     * the reader". Obsidian keeps both halves of the view, and more than one
+     * note's rendering, about; an element can answer yes to the first and no
+     * to the second, and lighting it then changes nothing anyone can see. Ask
+     * the question that matters. */
+    if (entry.el && entry.el.isConnected !== false && this.inside(host, entry.el)) {
+      return entry.el;
+    }
+
+    if (typeof host.querySelectorAll !== 'function') return null;
+    const want = sameWords(entry.linkText);
     if (!want) return null;
     const all = host.querySelectorAll(LINK_SELECTOR);
     for (let i = 0; i < all.length; i++) {
       const el = all[i];
-      if ((el.textContent || '').trim() === want) return el;
+      if (sameWords(el.textContent) === want) return el;
     }
     return null;
+  }
+
+  /* Is this element part of that one? contains() where it exists, and a walk
+   * up the parents where it does not. */
+  inside(host, el) {
+    if (host === el) return true;
+    if (typeof host.contains === 'function') return host.contains(el);
+    let node = el && el.parentNode;
+    while (node) {
+      if (node === host) return true;
+      node = node.parentNode;
+    }
+    return false;
   }
 
   /* Light it once the note has had time to be drawn. Lighting it in the same
@@ -603,7 +674,7 @@ class BacktrackPlugin extends Plugin {
     const left = attemptsLeft === undefined ? LOOK_ATTEMPTS : attemptsLeft;
     this.flashTimer = window.setTimeout(() => {
       this.flashTimer = 0;
-      if (this.flash(this.findLink(entry))) return;
+      if (this.flash(this.findLink(entry), entry)) return;
       /* Not there yet. Going back between notes has to open and draw the note
        * first, and how long that takes is not a number we get to pick. Give
        * up eventually rather than watch for ever: a link that never appears
@@ -613,13 +684,55 @@ class BacktrackPlugin extends Plugin {
     return this.flashTimer;
   }
 
-  flash(el) {
+  flash(el, entry) {
     if (!el || el.isConnected === false || typeof el.addClass !== 'function') return false;
+    this.light(el);
+    if (entry) this.keepLit(entry, el, 0);
+    return true;
+  }
+
+  /* Put the mark on, and take it off again when its time is up. */
+  light(el) {
     el.addClass('backtrack-flash');
     window.setTimeout(() => {
       if (typeof el.removeClass === 'function') el.removeClass('backtrack-flash');
     }, FLASH_MS);
-    return true;
+  }
+
+  /* Put the mark back if something took it off.
+   *
+   * Measured in a live vault rather than reasoned about: going back to a note
+   * in Live Preview left the mark on the right element and gone 300ms later,
+   * with the element still in the document. The same move inside one note
+   * kept it for the full ten seconds. The difference is whether the note was
+   * drawn again, and what draws it is CodeMirror, which owns those elements
+   * and rebuilds them from its own decorations.
+   *
+   * So the mark is checked a few times while the drawing settles and put back
+   * on whatever the link is by then - which may be a new element. It is not
+   * defended beyond that. */
+  keepLit(entry, el, step) {
+    const i = step || 0;
+    if (i >= KEEP_AT_MS.length) return 0;
+    if (this.keepTimer) window.clearTimeout(this.keepTimer);
+    const wait = KEEP_AT_MS[i] - (i ? KEEP_AT_MS[i - 1] : 0);
+    this.keepTimer = window.setTimeout(() => {
+      this.keepTimer = 0;
+      let on = el;
+      const gone =
+        !on ||
+        on.isConnected === false ||
+        (typeof on.hasClass === 'function' && !on.hasClass('backtrack-flash'));
+      if (gone) {
+        const again = this.findLink(entry);
+        if (again && typeof again.addClass === 'function') {
+          this.light(again);
+          on = again;
+        }
+      }
+      this.keepLit(entry, on || el, i + 1);
+    }, wait);
+    return this.keepTimer;
   }
 
   /* --- the button -------------------------------------------------- */
@@ -683,10 +796,13 @@ class BacktrackPlugin extends Plugin {
     if (!host || typeof host.getBoundingClientRect !== 'function') return null;
     const pane = host.getBoundingClientRect();
     if (!pane || !pane.height) return null;
+    /* The column of the half on screen. Asking the whole view would find the
+     * hidden half's column first, and a hidden box measures as nothing. */
+    const half = visibleHalf(view) || host;
     const inner =
-      (typeof host.querySelector === 'function' &&
-        host.querySelector('.markdown-preview-sizer, .cm-sizer, .cm-content')) ||
-      host;
+      (typeof half.querySelector === 'function' &&
+        half.querySelector('.markdown-preview-sizer, .cm-sizer, .cm-content')) ||
+      half;
     let col =
       inner && typeof inner.getBoundingClientRect === 'function'
         ? inner.getBoundingClientRect()
@@ -937,6 +1053,9 @@ module.exports.readSpotValue = readSpotValue;
 module.exports.GAP = GAP;
 module.exports.DRAG_SLOP = DRAG_SLOP;
 module.exports.describeEntry = describeEntry;
+module.exports.sameWords = sameWords;
+module.exports.visibleHalf = visibleHalf;
+module.exports.KEEP_AT_MS = KEEP_AT_MS;
 module.exports.MAX_ENTRIES = MAX_ENTRIES;
 module.exports.LINK_SELECTOR = LINK_SELECTOR;
 module.exports.GO_BACK_COMMAND = GO_BACK_COMMAND;

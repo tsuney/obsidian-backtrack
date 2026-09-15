@@ -75,6 +75,16 @@ class El {
     this.box = { left: left, top: top, width: width, height: height };
     return this;
   }
+  appendChild(e) { e.parent = this; this.children.push(e); return e; }
+  contains(el) {
+    let node = el;
+    while (node) {
+      if (node === this) return true;
+      node = node.parent;
+    }
+    return false;
+  }
+  get parentNode() { return this.parent; }
   setPointerCapture() {}
   releasePointerCapture() {}
   querySelectorAll(sel) {

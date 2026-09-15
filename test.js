@@ -40,9 +40,11 @@ const {
   readSpotValue,
   GAP,
   describeEntry,
+  sameWords,
   MAX_ENTRIES,
   LINK_SELECTOR,
   GO_BACK_COMMAND,
+  KEEP_AT_MS,
   BacktrackPlugin,
 } = m;
 
@@ -183,8 +185,12 @@ check('nothing to describe is not a crash', describeEntry(null) === '');
 
 /* ---------------- the click handler, on a real tree ---------------- */
 
-function makeLink(cls, href) {
+/* A link, optionally put into the note that is on screen. Left loose it
+ * stands for a link in some other note, which is how the stale-element case
+ * is set up. */
+function makeLink(cls, href, host) {
   const para = new El('p');
+  if (host) host.appendChild(para);
   const anchor = para.make('span', { cls: cls });
   if (href) anchor.setAttr('data-href', href);
   const inner = anchor.make('span', { cls: 'cm-underline', text: 'Heading' });
@@ -214,7 +220,21 @@ function makeApp(path, state) {
   const file = { path: path };
   const pane = new El('div');
   pane.setBox(300, 60, 800, 700);
-  const column = pane.make('div', { cls: 'markdown-preview-sizer' });
+  /* Both halves, the way a markdown view really is built.
+   *
+   * The editor is not thrown away while the reader is in reading view: it
+   * stays in the document, hidden, holding a second copy of every link in the
+   * note - and it comes first, so a search of the whole view finds it first.
+   * A fixture with only the visible half cannot show a mark landing in the
+   * invisible one, which is precisely the bug that reached the vault. The
+   * hidden half is given a box of nothing, as a hidden element measures. */
+  const source = pane.make('div', { cls: 'markdown-source-view' });
+  const editor = source.make('div', { cls: 'cm-editor' });
+  const cmContent = editor.make('div', { cls: 'cm-content' });
+  cmContent.setBox(0, 0, 0, 0);
+  const reading = pane.make('div', { cls: 'markdown-reading-view' });
+  const preview = reading.make('div', { cls: 'markdown-preview-view' });
+  const column = preview.make('div', { cls: 'markdown-preview-sizer' });
   column.setBox(500, 60, 400, 2000);
   const leaf = { id: 'leaf-' + path, history: { backHistory: [{}], forwardHistory: [] } };
   const view = {
@@ -223,6 +243,10 @@ function makeApp(path, state) {
     contentEl: pane,
     pane: pane,
     column: column,
+    /* Where note content goes in each half, so a test can put a link in the
+     * one the reader is looking at - or, deliberately, in the other. */
+    reading: column,
+    source: cmContent,
     state: state === undefined ? { scroll: 0 } : state,
     applied: undefined,
     getEphemeralState() { return this.state; },
@@ -858,7 +882,7 @@ function pressAt(p, x, y) {
 
 (function () {
   const { app, p } = boot('a.md', { scroll: 10 });
-  const link = makeLink('internal-link', '#Heading');
+  const link = makeLink('internal-link', '#Heading', app.view.reading);
   clickThen(p, link.inner);
   app.view.state = { scroll: 400 };
   p.settle();
@@ -906,6 +930,7 @@ function pressAt(p, x, y) {
   const { app, p } = boot('論文ノート.md', { scroll: 120 });
   const sup = new El('sup');
   sup.className = 'footnote-ref';
+  app.view.reading.appendChild(sup);
   const a = sup.make('a', { cls: 'footnote-link', text: '[1]' });
   a.setAttr('data-href', '#fn-1-abc');
   clickThen(p, a);
@@ -1001,7 +1026,7 @@ function pressAt(p, x, y) {
   /* Reading view took the paragraph out while we were away and built a new
    * one on the way back. The element we held is an orphan. */
   link.anchor.detach();
-  const rebuilt = app.view.contentEl.make('span', { cls: 'internal-link' });
+  const rebuilt = app.view.reading.make('span', { cls: 'internal-link' });
   rebuilt.make('span', { cls: 'cm-underline', text: '第 3 章 結論' });
   const found = p.findLink(p.stack[0]);
   check('so the new one is found by what it says', found === rebuilt);
@@ -1011,7 +1036,7 @@ function pressAt(p, x, y) {
 
 (function () {
   const { app, p } = boot('long.md', { scroll: 10 });
-  const link = makeLink('internal-link', '#Heading');
+  const link = makeLink('internal-link', '#Heading', app.view.reading);
   clickThen(p, link.inner);
   app.view.state = { scroll: 9000 };
   p.settle();
@@ -1020,11 +1045,123 @@ function pressAt(p, x, y) {
   check('and a link that no longer exists anywhere is not invented', p.findLink(orphan) === null);
 })();
 
+/* ---------------- the half the reader is not looking at ---------------- *
+ *
+ * The bug this exists for: a mark landed on the editor's copy of the link
+ * while the reader was in reading view, and from inside the plugin that is
+ * indistinguishable from success - the class really was added. It was found
+ * by logging what got lit in a live vault, because the fixture had only one
+ * half and so could not fail. */
+
+(function () {
+  const { app, p } = boot('both.md', { scroll: 10 });
+
+  /* The same link, written twice: once in the editor, which is hidden, and
+   * once in the reading view, which is what the reader can see. The editor's
+   * copy comes first in the document, as it does in Obsidian. */
+  const hidden = app.view.source.make('span', { cls: 'cm-hmd-internal-link' });
+  hidden.make('span', { cls: 'cm-underline', text: 'Knots' });
+
+  const link = makeLink('internal-link', 'Knots', app.view.reading);
+  link.inner.setText('Knots');
+  clickThen(p, link.inner);
+  app.view.file.path = 'knots.md';
+  p.settle();
+  app.view.file.path = 'both.md';
+
+  /* The note was redrawn while we were away: the old element is gone from the
+   * document, not merely marked, so the search runs. */
+  link.anchor.remove();
+  const redrawn = app.view.reading.make('span', { cls: 'internal-link' });
+  redrawn.make('span', { cls: 'cm-underline', text: 'Knots' });
+
+  const found = p.findLink(p.stack[0]);
+  check('the link that is lit is the one the reader can see', found === redrawn);
+  check('not the editor\'s hidden copy of the same link', found !== hidden);
+  p.flash(found);
+  check('so the mark lands where it can be seen', redrawn.hasClass('backtrack-flash'));
+  check('and nowhere else', hidden.hasClass('backtrack-flash') === false);
+})();
+
+(function () {
+  const { app, p } = boot('both.md', { scroll: 10 });
+  /* An element held from before a switch of mode is in the wrong half now. */
+  const stale = app.view.source.make('span', { cls: 'cm-hmd-internal-link' });
+  stale.make('span', { cls: 'cm-underline', text: 'Knots' });
+  const entry = { kind: 'within', path: 'both.md', leaf: app.view.leaf, el: stale, linkText: 'Knots' };
+  check('an element held in the hidden half is not used', p.findLink(entry) === null);
+})();
+
+(function () {
+  const { app, p } = boot('both.md', { scroll: 10 });
+  /* The editor's column measures as nothing while it is hidden. Asking the
+   * whole view would find it first and the button would be placed against a
+   * box at the origin. */
+  const seen = p.measure();
+  check('the column measured is the visible half\'s', seen && seen.col.width === 400);
+  check('and not the hidden editor\'s empty one', seen && seen.col.left === 500);
+})();
+
+/* ---------------- a mark that something else took off ------------------ *
+ *
+ * The second half of the same bug, and also measured rather than guessed:
+ * in Live Preview the mark landed on the right element and was gone 300ms
+ * later, the element still in the document. CodeMirror owns those elements
+ * and rebuilds them from its own decorations when a note is drawn again. */
+
+(function () {
+  const { app, p } = boot('keep.md', { scroll: 10 });
+  const link = makeLink('internal-link', '#Heading', app.view.reading);
+  link.inner.setText('Knots');
+  clickThen(p, link.inner);
+  app.view.state = { scroll: 900 };
+  p.settle();
+  const entry = p.stack[0];
+
+  /* Run the short checks at once so they can be watched. The long one is the
+   * mark's own ten seconds and is left alone, or it would take the mark off
+   * again before anything could be asked about it. */
+  const real = window.setTimeout;
+  let fakeId = 900;
+  window.setTimeout = function (fn, ms) {
+    if (ms <= 2000) { fn(); }
+    return ++fakeId;
+  };
+
+  p.light(link.anchor);
+  check('a mark put on stays on while nothing disturbs it', link.anchor.hasClass('backtrack-flash'));
+
+  /* CodeMirror discards a class that is not its own. */
+  link.anchor.removeClass('backtrack-flash');
+  p.keepLit(entry, link.anchor, 0);
+  check('a mark that was taken off is put back', link.anchor.hasClass('backtrack-flash'));
+
+  /* And when the rebuild replaced the element rather than stripping it. */
+  link.anchor.remove();
+  const redrawn = app.view.reading.make('span', { cls: 'internal-link' });
+  redrawn.make('span', { cls: 'cm-underline', text: 'Knots' });
+  p.keepLit(entry, link.anchor, 0);
+  check('and it lands on the new element when the old one was replaced', redrawn.hasClass('backtrack-flash'));
+
+  window.setTimeout = real;
+
+  check('the checks stop rather than running for ever', p.keepLit(entry, redrawn, KEEP_AT_MS.length) === 0);
+  check('and there are only a few of them', KEEP_AT_MS.length <= 6);
+
+  p.keepTimer = 0;
+  p.flash(redrawn);
+  check('lighting something with no move behind it starts no keeper', p.keepTimer === 0);
+  p.flash(redrawn, entry);
+  check('lighting the link a move came from does', p.keepTimer !== 0);
+  p.teardown();
+  check('and unloading stops it', p.keepTimer === 0);
+})();
+
 /* ---------------- looking for the link, not waiting a fixed time ------- */
 
 (function () {
   const { app, p } = boot('a.md', { scroll: 10 });
-  const link = makeLink('internal-link', '#Heading');
+  const link = makeLink('internal-link', '#Heading', app.view.reading);
   link.inner.setText('結論へ');
   clickThen(p, link.inner);
   app.view.state = { scroll: 500 };
@@ -1212,6 +1349,67 @@ function pressAt(p, x, y) {
   check('other keys are left alone', third.app.view.applied === undefined);
   window.localStorage.clear();
   for (const k of Object.keys(appStores)) delete appStores[k];
+})();
+
+/* --------- still in the document is not still in this note --------- */
+
+check('link text is compared by the words, not the whitespace',
+  sameWords('  Backtrack   Demo  ') === sameWords('Backtrack Demo'));
+check('and nothing is still nothing', sameWords(null) === '');
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  const link = makeLink('internal-link', 'Other Note');
+  link.inner.setText('Other Note');
+  clickThen(p, link.inner);
+  const from = app.view;
+
+  /* Go to another note in the same pane. Obsidian keeps the note we left
+   * rendered somewhere, so the element we held is still in the document. */
+  const elsewhere = new El('div');
+  app.view = {
+    file: { path: 'b.md' },
+    leaf: from.leaf,
+    contentEl: elsewhere,
+    state: { scroll: 0 },
+    getEphemeralState() { return this.state; },
+    setEphemeralState(s) { this.applied = s; },
+  };
+  p.settle();
+  const entry = p.stack[0];
+  check('the move across is remembered', entry && entry.kind === 'across');
+  check('and the element we kept is still in the document', link.anchor.isConnected === true);
+  check('but it is not in the note on screen, so it is not offered',
+    p.findLink(entry) === null);
+
+  /* Back to the first note, redrawn: a new element, the same words. */
+  const redrawn = new El('div');
+  const fresh = redrawn.make('span', { cls: 'internal-link' });
+  fresh.make('span', { cls: 'cm-underline', text: 'Other Note' });
+  app.view = {
+    file: { path: 'a.md' },
+    leaf: from.leaf,
+    contentEl: redrawn,
+    state: { scroll: 10 },
+    getEphemeralState() { return this.state; },
+    setEphemeralState(s) { this.applied = s; },
+  };
+  check('once we are back, the new element is found by its words',
+    p.findLink(entry) === fresh);
+  check('and it is the one that lights', p.flash(p.findLink(entry)) === true);
+  check('the stale one is left dark', !link.anchor.hasClass('backtrack-flash'));
+})();
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 10 });
+  /* Inside one note nothing was redrawn, so the element we held is still in
+   * the note on screen and is used as it is. */
+  const link = makeLink('internal-link', '#Heading', app.view.reading);
+  clickThen(p, link.inner);
+  app.view.state = { scroll: 500 };
+  p.settle();
+  check('inside one note the element we held is used as it is',
+    p.findLink(p.stack[0]) === link.anchor);
 })();
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
