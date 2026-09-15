@@ -41,6 +41,13 @@ Notice.last = null;
 
 const Platform = { isMobile: false, isMacOS: true };
 
+/* Obsidian's own tooltip. The stub keeps what it was told, so a test can ask
+ * what the reader would be shown - not merely that something was set. */
+function setTooltip(el, text, options) {
+  el.tooltip = text;
+  el.tooltipOptions = options || null;
+}
+
 /* The real one puts an <svg class="svg-icon"> inside. Enough of that here for
  * a test to show the button is not empty. */
 function setIcon(el, name) {
@@ -58,5 +65,6 @@ module.exports = {
   Notice,
   Platform,
   setIcon,
+  setTooltip,
   debounce,
 };

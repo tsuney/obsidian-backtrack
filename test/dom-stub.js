@@ -181,13 +181,30 @@ function makeDocument() {
     createElementNS: () => new El('svg'),
   };
   body.doc = doc;
+  doc.cssVars = {};
   doc.defaultView = {
+    getComputedStyle: computedStyleFor(doc),
     setTimeout: (fn, ms) => setTimeout(fn, ms),
     clearTimeout: (id) => clearTimeout(id),
     addEventListener: () => {},
     removeEventListener: () => {},
   };
   return doc;
+}
+
+/* Enough of getComputedStyle for a rule that asks the stylesheet a question.
+ * It answers with whatever a test put on the element, or on its document. */
+function computedStyleFor(doc) {
+  return function (el) {
+    return {
+      getPropertyValue(name) {
+        const own = el && el.props && el.props[name];
+        if (own !== undefined) return own;
+        const sheet = doc && doc.cssVars;
+        return (sheet && sheet[name] !== undefined) ? sheet[name] : '';
+      },
+    };
+  };
 }
 
 function install() {
@@ -200,7 +217,9 @@ function install() {
   };
   body.doc = global.document;
   const store = {};
+  global.document.cssVars = {};
   global.window = {
+    getComputedStyle: computedStyleFor(global.document),
     setTimeout: (fn, ms) => setTimeout(fn, ms),
     clearTimeout: (id) => clearTimeout(id),
     addEventListener: () => {},

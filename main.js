@@ -31,7 +31,7 @@
  */
 
 const obsidian = require('obsidian');
-const { Plugin, Notice, MarkdownView, Platform, setIcon } = obsidian;
+const { Plugin, Notice, MarkdownView, Platform, setIcon, setTooltip } = obsidian;
 
 /* How many moves we are willing to remember. */
 const MAX_ENTRIES = 10;
@@ -104,6 +104,10 @@ const GO_BACK_COMMAND = 'app:go-back';
 /* The events a press on a link can reach us as. One gesture usually produces
  * more than one of these, and the first to arrive is the one we trust. */
 const CATCH_EVENTS = ['pointerup', 'touchend', 'click'];
+
+/* How much of a link's text a label will carry. Long enough to recognise the
+ * link, short enough that the label stays a label. */
+const LABEL_WORDS = 42;
 
 /* ------------------------------------------------------------------ *
  * Pure helpers. Everything below this line can be tested without an
@@ -331,15 +335,51 @@ function docOf(el) {
   return el.doc || el.ownerDocument || null;
 }
 
-/* What to call the place a button press would take you. */
+/* "10s", "0.5s", "250ms", "10" -> milliseconds. Anything unusable -> 0, so a
+ * caller can fall back rather than light something for no time at all. */
+function readSeconds(raw) {
+  const text = String(raw == null ? '' : raw).trim();
+  if (!text) return 0;
+  const n = parseFloat(text);
+  if (!isFinite(n) || n <= 0) return 0;
+  return /ms\s*$/.test(text) ? n : n * 1000;
+}
+
+/* A note's name, without its folder or its extension. */
+function noteName(path) {
+  return String(path || '').split('/').pop().replace(/\.md$/, '');
+}
+
+/* Link text, short enough to sit in a label. */
+function shorten(text, most) {
+  const words = sameWords(text);
+  const limit = most || LABEL_WORDS;
+  if (words.length <= limit) return words;
+  return words.slice(0, limit - 1).replace(/\s+\S*$/, '') + '…';
+}
+
+/* What to call the place a button press would take you.
+ *
+ * Named, not described. "The note you came from" is a true sentence that
+ * withholds what the reader wants: which note. We hold the name, so we say it.
+ *
+ * With one honest caveat, for the note-to-note case. That move is handed to
+ * Obsidian, and where it lands is decided by the pane's own history, which is
+ * a second record of the same thing and can disagree with ours. Naming the
+ * note is therefore a promise that can be broken. It is worth making: being
+ * told the wrong name costs a glance, and being told nothing costs the reader
+ * the decision of whether to press at all. */
 function describeEntry(entry) {
   if (!entry) return '';
-  if (entry.kind === 'across') return 'the note you came from';
+  const name = noteName(entry.path);
+  if (entry.kind === 'across') return name || 'the note you came from';
   if (entry.kind === 'pane') {
-    const from = String(entry.path || '').split('/').pop().replace(/\.md$/, '');
-    return from ? 'the pane you clicked in (' + from + ')' : 'the pane you clicked in';
+    return name ? 'the pane you clicked in (' + name + ')' : 'the pane you clicked in';
   }
-  const name = String(entry.path || '').split('/').pop().replace(/\.md$/, '');
+  /* Inside one note, the note's name says nothing - the reader is in it. What
+   * they left from is the link, so that is what is named. */
+  const words = shorten(entry.linkText);
+  if (words) return 'your place before "' + words + '"';
   return name ? 'where you were in ' + name : 'where you were';
 }
 
@@ -782,12 +822,35 @@ class BacktrackPlugin extends Plugin {
     return true;
   }
 
+  /* How long the mark stays, as the stylesheet says.
+   *
+   * The length of the animation lives in CSS, where a theme or a snippet can
+   * change it - and where the Style Settings plugin offers it as a slider.
+   * Keeping a second copy of the number here would let the two disagree: the
+   * class taken off at ten seconds while the animation was set to thirty
+   * leaves the mark stopping half way for no reason the reader can see. So
+   * the stylesheet is asked, and the constant is only what to do when it will
+   * not answer. */
+  flashMs(el) {
+    const win = (docOf(el) || document).defaultView || window;
+    try {
+      if (typeof win.getComputedStyle !== 'function') return FLASH_MS;
+      const said = readSeconds(win.getComputedStyle(el).getPropertyValue('--backtrack-flash-seconds'));
+      if (said) return said;
+    } catch (e) {
+      /* asked and not answered */
+    }
+    return FLASH_MS;
+  }
+
   /* Put the mark on, and take it off again when its time is up. */
   light(el) {
     el.addClass('backtrack-flash');
+    const ms = this.flashMs(el);
+    this.litFor = ms;
     window.setTimeout(() => {
       if (typeof el.removeClass === 'function') el.removeClass('backtrack-flash');
-    }, FLASH_MS);
+    }, ms);
   }
 
   /* Put the mark back if something took it off.
@@ -805,6 +868,10 @@ class BacktrackPlugin extends Plugin {
   keepLit(entry, el, step) {
     const i = step || 0;
     if (i >= KEEP_AT_MS.length) return 0;
+    /* Never defend a mark past its own lifetime. With a short setting the
+     * mark is gone by the second check, and putting it back then would light
+     * the link again after the reader had watched it go out. */
+    if (KEEP_AT_MS[i] >= (this.litFor || FLASH_MS)) return 0;
     if (this.keepTimer) window.clearTimeout(this.keepTimer);
     const wait = KEEP_AT_MS[i] - (i ? KEEP_AT_MS[i - 1] : 0);
     this.keepTimer = window.setTimeout(() => {
@@ -1072,10 +1139,17 @@ class BacktrackPlugin extends Plugin {
      * has not been laid out yet, and a jump inside one note raises no event
      * that would have prompted a second look. */
     if (usable && !wasShowing) this.place();
-    this.button.setAttribute(
-      'aria-label',
-      usable ? 'Back to ' + describeEntry(usable) : 'Undo the last move'
-    );
+    /* The same words to the eye, to a screen reader, and to a long press.
+     *
+     * A tooltip is the desktop half of what a long press already answers on a
+     * phone: where would this take me. Obsidian's own is used rather than the
+     * browser's title attribute, so it is themed and appears when the app's
+     * other tooltips do. */
+    const label = usable ? 'Back to ' + describeEntry(usable) : 'Undo the last move';
+    this.button.setAttribute('aria-label', label);
+    if (typeof setTooltip === 'function') {
+      setTooltip(this.button, label, { placement: 'left' });
+    }
   }
 
   /* Where we are, as an entry has to match it: which note, which pane, and
@@ -1161,4 +1235,8 @@ module.exports.MAX_ENTRIES = MAX_ENTRIES;
 module.exports.LINK_SELECTOR = LINK_SELECTOR;
 module.exports.CATCH_EVENTS = CATCH_EVENTS;
 module.exports.docOf = docOf;
+module.exports.noteName = noteName;
+module.exports.readSeconds = readSeconds;
+module.exports.shorten = shorten;
+module.exports.LABEL_WORDS = LABEL_WORDS;
 module.exports.GO_BACK_COMMAND = GO_BACK_COMMAND;

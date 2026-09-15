@@ -38,6 +38,7 @@ const {
   spotKey,
   fallbackKey,
   readSpotValue,
+  readSeconds,
   GAP,
   describeEntry,
   sameWords,
@@ -177,13 +178,42 @@ check('with nowhere to be there is nothing to say either', classify('a.md', null
 
 /* ---------------- describeEntry ---------------- */
 
-check('a move across is described by where it came from', describeEntry({ kind: 'across' }).length > 0);
+/* Named, not described. The name is held either way, so withholding it only
+ * makes the reader press to find out. */
+
 check(
-  'a move within names the note, without its folder or extension',
+  'a move across names the note it came from',
+  describeEntry({ kind: 'across', path: 'Folder/Lighthouse.md' }) === 'Lighthouse'
+);
+check(
+  'and falls back to words when there is no name to give',
+  describeEntry({ kind: 'across', path: '' }).length > 0
+);
+check(
+  'a move within names the link left from, not the note the reader is already in',
+  describeEntry({ kind: 'within', path: 'Folder/My Note.md', linkText: '3. The lamp' })
+    .indexOf('3. The lamp') !== -1
+);
+check(
+  'and names the note only when the link said nothing',
   describeEntry({ kind: 'within', path: 'Folder/Sub/My Note.md' }).indexOf('My Note') !== -1
 );
 check('and says nothing about folders', describeEntry({ kind: 'within', path: 'Folder/My Note.md' }).indexOf('Folder') === -1);
+check(
+  'a pane still names the note it was left in',
+  describeEntry({ kind: 'pane', path: 'Folder/Pinned.md' }).indexOf('Pinned') !== -1
+);
 check('nothing to describe is not a crash', describeEntry(null) === '');
+
+(function () {
+  const long = 'A heading so long that no label could carry the whole of it without becoming a paragraph';
+  const said = describeEntry({ kind: 'within', path: 'a.md', linkText: long });
+  check('a very long link is cut rather than let run', said.length < long.length);
+  check('and the cut is marked, so nobody reads it as the whole name', said.indexOf('…') !== -1);
+  check('the beginning is what is kept', said.indexOf('A heading so long') !== -1);
+  const tidy = describeEntry({ kind: 'within', path: 'a.md', linkText: '  spaced   out  ' });
+  check('rendering whitespace does not reach the label', tidy.indexOf('"spaced out"') !== -1);
+})();
 
 /* ---------------- the click handler, on a real tree ---------------- */
 
@@ -323,6 +353,39 @@ function clickThen(p, anchorEl) {
     'and one that answers where it would go, for when the button is not in front of you',
     p.commands.some((c) => c.id === 'say-where')
   );
+})();
+
+/* ---------------- one number, in one place ---------------- *
+ *
+ * How long the mark stays is the stylesheet's, because that is where a theme,
+ * a snippet or the Style Settings plugin can reach it. A copy of the number
+ * in script would be a second answer to one question, and the two would
+ * disagree the moment anyone changed one: the class taken off at ten seconds
+ * while the animation runs for thirty leaves the mark stopping half way. */
+
+check('a plain number of seconds is read', readSeconds('10s') === 10000);
+check('a fraction too', readSeconds('0.5s') === 500);
+check('milliseconds are not multiplied again', readSeconds('250ms') === 250);
+check('a bare number is taken as seconds, as CSS would', readSeconds('3') === 3000);
+check('nothing said is nothing to use', readSeconds('') === 0);
+check('and neither is nonsense', readSeconds('inherit') === 0);
+check('nor a length that would light it for no time', readSeconds('0s') === 0);
+
+(function () {
+  const { app, p } = boot('a.md', { scroll: 1 });
+  const link = makeLink('internal-link', '#Heading', app.view.reading);
+  check('with the stylesheet silent, the built-in length is used', p.flashMs(link.anchor) === 10000);
+
+  document.cssVars['--backtrack-flash-seconds'] = '30s';
+  check('and when it speaks, it is believed', p.flashMs(link.anchor) === 30000);
+
+  /* Short enough that the mark is gone before the later checks come round. */
+  document.cssVars['--backtrack-flash-seconds'] = '0.4s';
+  p.light(link.anchor);
+  check('the mark is lit for as long as the stylesheet says', p.litFor === 400);
+  check('and the checks that would put it back stop short of that',
+    p.keepLit({ kind: 'within', path: 'a.md', linkText: 'x' }, link.anchor, 1) === 0);
+  delete document.cssVars['--backtrack-flash-seconds'];
 })();
 
 /* ---------------- more than one window ---------------- *
@@ -483,6 +546,31 @@ function fireOn(p, type, ev) {
   check('but not showing, because there is nothing to undo', !p.button.hasClass('is-visible'));
   check('it carries an icon, not an empty circle', p.button.find((e) => e.hasClass('svg-icon')).length === 1);
   check('and a label a screen reader can say', !!p.button.getAttribute('aria-label'));
+  check('and a tooltip, which is the same question a long press answers',
+    typeof p.button.tooltip === 'string' && p.button.tooltip.length > 0);
+})();
+
+/* The label is the answer to "where would this take me", and it is given the
+ * same way to the eye, to a screen reader and to a long press. Three
+ * renderings of one answer that could drift apart is three answers. */
+(function () {
+  const { app, p } = boot('field.md', { scroll: 5 });
+  const link = makeLink('internal-link', '#The lamp', app.view.reading);
+  link.inner.setText('3. The lamp');
+  clickThen(p, link.inner);
+  app.view.state = { scroll: 900 };
+  p.settle();
+
+  const said = p.button.getAttribute('aria-label');
+  check('the label names the link the reader left from', said.indexOf('3. The lamp') !== -1);
+  check('the tooltip says the same thing', p.button.tooltip === said);
+  p.sayWhere();
+  check('and so does a long press', Notice.last && Notice.last.indexOf('3. The lamp') !== -1);
+
+  p.goBack();
+  check('with nothing left to undo, it stops claiming a destination',
+    p.button.getAttribute('aria-label') === 'Undo the last move');
+  check('and the tooltip stops claiming one too', p.button.tooltip === 'Undo the last move');
 })();
 
 (function () {
@@ -709,6 +797,10 @@ function fireOn(p, type, ev) {
   check('and its folders do not come with it', name.indexOf('Obsidian App') === -1);
   const spaced = describeEntry({ kind: 'within', path: 'a folder/a note with spaces.md' });
   check('spaces in a name are not a problem', spaced.indexOf('a note with spaces') !== -1);
+  const acrossJa = describeEntry({ kind: 'across', path: '議事録/2026-09-14 定例.md' });
+  check('and a Japanese note is named on the way back between notes', acrossJa === '2026-09-14 定例');
+  const jaLink = describeEntry({ kind: 'within', path: 'a.md', linkText: '第 3 章 結論' });
+  check('a Japanese link is named too', jaLink.indexOf('第 3 章 結論') !== -1);
 
   const { app, p } = boot('議事録/2026-09-14 定例.md', { scroll: 3 });
   const link = makeLink('internal-link', '#2. 決めたこと');

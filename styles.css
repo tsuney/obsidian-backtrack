@@ -3,7 +3,97 @@
  *
  * One floating control. It sits out of the way of everything the app already
  * puts in the bottom corners, and it is big enough to hit with a thumb.
+ *
+ * Everything a reader might want to change is a custom property with a
+ * sensible fallback, so a CSS snippet can reach it and so can the Style
+ * Settings plugin, which reads the block below. There is no settings screen
+ * of our own: a second way to answer the same question is a second answer.
  */
+
+/* @settings
+
+name: Backtrack
+id: backtrack
+settings:
+    -
+        id: backtrack-button-heading
+        title: The button
+        type: heading
+        level: 2
+        collapsed: true
+    -
+        id: backtrack-size
+        title: Size
+        description: How big the button is. 44px is the smallest target a finger can be relied on to hit.
+        type: variable-number-slider
+        default: 44
+        min: 32
+        max: 72
+        step: 2
+        format: px
+    -
+        id: backtrack-radius
+        title: Corner rounding
+        description: 50% is a disc. Lower it for a rounded square.
+        type: variable-number-slider
+        default: 50
+        min: 0
+        max: 50
+        step: 5
+        format: '%'
+    -
+        id: backtrack-fill
+        title: Colour
+        description: The accent colour of the theme, unless you pick another.
+        type: variable-themed-color
+        format: hex
+        opacity: true
+        default-light: '#'
+        default-dark: '#'
+    -
+        id: backtrack-glyph
+        title: Arrow colour
+        type: variable-themed-color
+        format: hex
+        opacity: false
+        default-light: '#'
+        default-dark: '#'
+    -
+        id: backtrack-rest
+        title: Opacity while idle
+        description: Lower it if the button catches your eye while you are reading. It goes fully solid when you point at it.
+        type: variable-number-slider
+        default: 100
+        min: 20
+        max: 100
+        step: 5
+        format: '%'
+    -
+        id: backtrack-flash-heading
+        title: The mark on the link you came from
+        type: heading
+        level: 2
+        collapsed: true
+    -
+        id: backtrack-flash-seconds
+        title: How long it stays
+        description: The mark arrives filled, settles to a thin ring within the first second, and fades from there.
+        type: variable-number-slider
+        default: 10
+        min: 1
+        max: 30
+        step: 1
+        format: s
+    -
+        id: backtrack-flash-color
+        title: Colour of the mark
+        type: variable-themed-color
+        format: hex
+        opacity: false
+        default-light: '#'
+        default-dark: '#'
+
+*/
 
 .backtrack-fab {
   position: fixed;
@@ -17,14 +107,14 @@
   bottom: calc(env(safe-area-inset-bottom, 0px) + 44px);
 
   /* 44px is the smallest target a finger can be relied on to hit. */
-  width: 44px;
-  height: 44px;
+  width: var(--backtrack-size, 44px);
+  height: var(--backtrack-size, 44px);
 
   display: none;
   align-items: center;
   justify-content: center;
 
-  border-radius: 50%;
+  border-radius: var(--backtrack-radius, 50%);
   border: none;
 
   /* The accent colour, carried by the shape and not by any text. The theme's
@@ -32,8 +122,9 @@
    * background it is safe on, so it fills the disc while the glyph takes the
    * colour the theme pairs with it. A button that has to be found is the one
    * case where being quiet is the wrong answer. */
-  background-color: var(--interactive-accent);
-  color: var(--text-on-accent);
+  background-color: var(--backtrack-fill, var(--interactive-accent));
+  color: var(--backtrack-glyph, var(--text-on-accent));
+  opacity: var(--backtrack-rest, 1);
   box-shadow: var(--shadow-s, 0 2px 8px rgba(0, 0, 0, 0.24));
 
   cursor: pointer;
@@ -56,7 +147,10 @@
 }
 
 .backtrack-fab:hover {
-  background-color: var(--interactive-accent-hover, var(--interactive-accent));
+  background-color: var(--backtrack-fill, var(--interactive-accent-hover, var(--interactive-accent)));
+  /* Whatever it rests at, it is solid once you are pointing at it: a control
+   * being used is not a control staying out of the way. */
+  opacity: 1;
 }
 
 .backtrack-fab:active {
@@ -75,8 +169,8 @@
  */
 .is-mobile .backtrack-fab {
   bottom: calc(env(safe-area-inset-bottom, 0px) + 72px);
-  width: 48px;
-  height: 48px;
+  width: var(--backtrack-size, 48px);
+  height: var(--backtrack-size, 48px);
 }
 
 .is-mobile.is-keyboard-shown .backtrack-fab {
@@ -115,7 +209,7 @@
  */
 .backtrack-flash {
   border-radius: 4px;
-  animation: backtrack-land 10s ease-out forwards;
+  animation: backtrack-land var(--backtrack-flash-seconds, 10s) ease-out forwards;
 }
 
 /*
@@ -125,21 +219,21 @@
  */
 @keyframes backtrack-land {
   0% {
-    box-shadow: 0 0 0 6px var(--interactive-accent);
-    background-color: var(--interactive-accent);
+    box-shadow: 0 0 0 6px var(--backtrack-flash-color, var(--interactive-accent));
+    background-color: var(--backtrack-flash-color, var(--interactive-accent));
     color: var(--text-on-accent);
   }
   4% {
-    box-shadow: 0 0 0 3px var(--interactive-accent);
-    background-color: var(--interactive-accent);
+    box-shadow: 0 0 0 3px var(--backtrack-flash-color, var(--interactive-accent));
+    background-color: var(--backtrack-flash-color, var(--interactive-accent));
     color: var(--text-on-accent);
   }
   10% {
-    box-shadow: 0 0 0 2px var(--interactive-accent);
+    box-shadow: 0 0 0 2px var(--backtrack-flash-color, var(--interactive-accent));
     background-color: transparent;
   }
   85% {
-    box-shadow: 0 0 0 2px var(--interactive-accent);
+    box-shadow: 0 0 0 2px var(--backtrack-flash-color, var(--interactive-accent));
     background-color: transparent;
   }
   100% {
