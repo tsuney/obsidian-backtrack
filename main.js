@@ -320,6 +320,17 @@ function visibleHalf(view) {
   return host.querySelector(want) || host;
 }
 
+/* Which document an element belongs to.
+ *
+ * A pop-out window is a separate document with its own body, and a button in
+ * the main window's body is not in it - it is not merely misplaced, it is not
+ * there at all. Obsidian hangs a `doc` on elements for exactly this; the
+ * standard `ownerDocument` is the fallback. */
+function docOf(el) {
+  if (!el) return null;
+  return el.doc || el.ownerDocument || null;
+}
+
 /* What to call the place a button press would take you. */
 function describeEntry(entry) {
   if (!entry) return '';
@@ -360,10 +371,9 @@ class BacktrackPlugin extends Plugin {
      * Over-catching costs nothing. What is caught is only a candidate: 140ms
      * later we look at where we actually are, and if nothing moved, nothing
      * is remembered. The decision was never the event's to make. */
-    const catchLinkEvent = this.onLinkClick.bind(this);
-    CATCH_EVENTS.forEach((type) => {
-      this.registerDomEvent(document, type, catchLinkEvent, { capture: true });
-    });
+    this.catchLinkEvent = this.onLinkClick.bind(this);
+    this.wired = [];
+    this.wire(document);
 
     this.addCommand({
       id: 'go-back',
@@ -402,6 +412,7 @@ class BacktrackPlugin extends Plugin {
      * asked again whenever that changes. A judgement nobody re-runs keeps
      * showing yesterday's conclusion. */
     const again = () => {
+      this.ensureButton();
       this.render();
       this.place();
     };
@@ -436,6 +447,44 @@ class BacktrackPlugin extends Plugin {
 
   activeView() {
     return this.app.workspace.getActiveViewOfType(MarkdownView);
+  }
+
+  /* --- more than one window ---------------------------------------- *
+   *
+   * "Open in new window" puts a note in a separate document, with its own
+   * body and its own events. A plugin that only ever looked at `document`
+   * has, from that window's point of view, not been installed: no button in
+   * the body, and no listener to catch a press. Nothing was misplaced - there
+   * was nothing there.
+   *
+   * So both the button and the listeners follow the note. The button is built
+   * in whichever document holds the view the reader is in, and rebuilt when
+   * that changes; a window is wired for presses the first time it is used. */
+
+  /* The document the reader is looking at: the one holding the active view,
+   * and the main one when there is no view to ask. */
+  activeDoc() {
+    const view = this.activeView();
+    return docOf(view && view.contentEl) || document;
+  }
+
+  /* Catch presses in this window. Once per window: registerDomEvent is the
+   * plugin's own, so all of them are taken down when it unloads. */
+  wire(doc) {
+    if (!doc || this.wired.indexOf(doc) !== -1) return false;
+    this.wired.push(doc);
+    CATCH_EVENTS.forEach((type) => {
+      this.registerDomEvent(doc, type, this.catchLinkEvent, { capture: true });
+    });
+    const win = doc.defaultView;
+    if (win && win !== window) {
+      this.registerDomEvent(win, 'resize', () => {
+        this.ensureButton();
+        this.render();
+        this.place();
+      });
+    }
+    return true;
   }
 
   /* Can Obsidian still take a note-to-note move back?
@@ -780,8 +829,18 @@ class BacktrackPlugin extends Plugin {
   /* --- the button -------------------------------------------------- */
 
   ensureButton() {
+    const doc = this.activeDoc();
+    this.wire(doc);
+    /* A button in another window is no use here, and cannot be moved: it is a
+     * node of a document this one knows nothing about. Take it down and build
+     * one where the reader is. */
+    if (this.button && docOf(this.button) !== doc) {
+      this.button.remove();
+      this.button = null;
+      this.at = null;
+    }
     if (this.button) return this.button;
-    const host = document.body;
+    const host = doc && doc.body;
     if (!host || typeof host.createDiv !== 'function') return null;
 
     const el = host.createDiv({ cls: 'backtrack-fab' });
@@ -1101,4 +1160,5 @@ module.exports.KEEP_AT_MS = KEEP_AT_MS;
 module.exports.MAX_ENTRIES = MAX_ENTRIES;
 module.exports.LINK_SELECTOR = LINK_SELECTOR;
 module.exports.CATCH_EVENTS = CATCH_EVENTS;
+module.exports.docOf = docOf;
 module.exports.GO_BACK_COMMAND = GO_BACK_COMMAND;

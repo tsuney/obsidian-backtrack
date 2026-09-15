@@ -45,6 +45,7 @@ const {
   LINK_SELECTOR,
   GO_BACK_COMMAND,
   KEEP_AT_MS,
+  docOf,
   CATCH_EVENTS,
   BacktrackPlugin,
 } = m;
@@ -324,6 +325,76 @@ function clickThen(p, anchorEl) {
   );
 })();
 
+/* ---------------- more than one window ---------------- *
+ *
+ * "Open in new window" puts the note in a separate document, with its own
+ * body and its own events. A button built in the main window's body is not
+ * merely in the wrong place there - it is not in that document at all, and
+ * neither are the listeners. From the new window the plugin looks uninstalled,
+ * which is exactly how it looked. */
+
+/* A markdown view living in the document given: a pop-out window. */
+function popoutView(doc, path, leaf) {
+  const pane = doc.body.make('div');
+  pane.setBox(0, 0, 900, 800);
+  const source = pane.make('div', { cls: 'markdown-source-view' });
+  source.make('div', { cls: 'cm-editor' }).make('div', { cls: 'cm-content' }).setBox(0, 0, 0, 0);
+  const reading = pane.make('div', { cls: 'markdown-reading-view' });
+  const column = reading.make('div', { cls: 'markdown-preview-view' })
+    .make('div', { cls: 'markdown-preview-sizer' });
+  column.setBox(100, 0, 500, 1500);
+  return {
+    file: { path: path },
+    leaf: leaf,
+    contentEl: pane,
+    pane: pane,
+    column: column,
+    reading: column,
+    state: { scroll: 0 },
+    getEphemeralState() { return this.state; },
+    setEphemeralState(s) { this.applied = s; },
+    getMode() { return 'preview'; },
+  };
+}
+
+(function () {
+  const { app, p } = boot('a.md');
+  const inMain = p.button;
+  check('to start with, the button is in the main window', docOf(inMain) === document);
+
+  const two = dom.makeDocument();
+  const leaf = { id: 'leaf-popout', history: { backHistory: [{}], forwardHistory: [] } };
+  app.view = popoutView(two, 'popped.md', leaf);
+  app.leaves.push(leaf);
+  app.workspace.fire('active-leaf-change');
+
+  check('opening a note in its own window builds a button there', docOf(p.button) === two);
+  check('and it is in that window\'s body, where it can be seen', two.body.contains(p.button));
+  check('the old one does not linger in the window nobody is looking at',
+    !document.body.contains(inMain));
+
+  const wiredThere = p.domEvents.filter((e) => e.el === two);
+  check('that window is wired for presses too', wiredThere.length > 0);
+  check('for every kind of press',
+    CATCH_EVENTS.every((t) => wiredThere.some((e) => e.type === t)));
+  check('and on the capture phase there as well',
+    wiredThere.every((e) => !e.options || e.options.capture === true));
+
+  /* A press in the new window is caught, and the button there offers it. */
+  const link = makeLink('internal-link', '#Heading', app.view.reading);
+  const row = wiredThere.filter((e) => e.type === 'click')[0];
+  check('there is a listener in that window to fire', !!row);
+  if (!row) return;
+  row.fn({ target: link.inner });
+  if (p.settleTimer) { clearTimeout(p.settleTimer); p.settleTimer = 0; }
+  app.view.state = { scroll: 800 };
+  p.settle();
+  check('a jump made in that window is remembered', p.stack.length === 1);
+  check('and the button there shows it', p.button.hasClass('is-visible'));
+  check('sitting inside that window, not off its edge',
+    p.at && p.at.left >= 0 && p.at.left < 900);
+})();
+
 /* ---------------- a press is not obliged to be a click ---------------- *
  *
  * A phone may take the touch for itself and never let a click through, and
@@ -406,6 +477,7 @@ function fireOn(p, type, ev) {
 
 (function () {
   const { app, p } = boot('a.md');
+  check('the button is built in the document the reader is in', docOf(p.button) === document);
   check('the button exists as soon as the layout is ready', !!p.button);
   check('and it is in the document', !!p.button && p.button.isConnected === true);
   check('but not showing, because there is nothing to undo', !p.button.hasClass('is-visible'));

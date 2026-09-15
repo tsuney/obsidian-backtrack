@@ -34,6 +34,10 @@ class El {
     if (o && o.cls) e.className = o.cls;
     if (o && o.text) e.text = String(o.text);
     e.parent = this;
+    /* Which document an element belongs to. A stub where every element is in
+     * the same document cannot show the pop-out window case, where the body
+     * the button was built in is not the body the reader is looking at. */
+    e.doc = this.doc || null;
     this.children.push(e);
     return e;
   }
@@ -58,6 +62,11 @@ class El {
   remove() {
     this.detach();
     if (this.parent) this.parent.children = this.parent.children.filter((c) => c !== this);
+    /* A removed node has no parent any more. Leaving the link in place lets a
+     * test ask "is it still in the body?" and be told yes about something
+     * that has been taken out, which is the kind of answer a stub must not
+     * give. */
+    this.parent = null;
   }
 
   getBoundingClientRect() {
@@ -162,6 +171,25 @@ class El {
   }
 }
 
+/* A document of its own, with its own body: what "open in new window" makes.
+ * The listeners a plugin put on one document are not on this one. */
+function makeDocument() {
+  const body = new El('body');
+  const doc = {
+    body: body,
+    createElement: (t) => new El(t),
+    createElementNS: () => new El('svg'),
+  };
+  body.doc = doc;
+  doc.defaultView = {
+    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    clearTimeout: (id) => clearTimeout(id),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+  return doc;
+}
+
 function install() {
   const body = new El('body');
   global.El = El;
@@ -170,6 +198,7 @@ function install() {
     createElement: (t) => new El(t),
     createElementNS: () => new El('svg'),
   };
+  body.doc = global.document;
   const store = {};
   global.window = {
     setTimeout: (fn, ms) => setTimeout(fn, ms),
@@ -186,4 +215,4 @@ function install() {
   return { El: El, body: body };
 }
 
-module.exports = { El: El, install: install };
+module.exports = { El: El, install: install, makeDocument: makeDocument };
